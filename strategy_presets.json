@@ -1,0 +1,493 @@
+{
+  "strategies": [
+    {
+      "id": "none",
+      "label": "不启用",
+      "description": "关闭策略预警。",
+      "type": "builtin",
+      "mode": "simple",
+      "timeframe": "5m",
+      "indicator_specs": [],
+      "buy_rules_eval": [],
+      "sell_rules_eval": [],
+      "indicators": [],
+      "buy_rules": [],
+      "sell_rules": [],
+      "notes": [
+        "当前策略已关闭，不计算买入或卖出命中。"
+      ]
+    },
+    {
+      "id": "liu_core_v1",
+      "label": "刘昌松核心法则 v1",
+      "description": "周线定方向，日线定波段，60/120分钟捕捉双金与底背离，同时按 5/20/60 均线风控。",
+      "type": "builtin",
+      "mode": "composite",
+      "timeframe": "1w · 1d · 60m · 120m",
+      "primary_component": "intraday_60m",
+      "priority_component": "intraday_60m",
+      "priority_indicator": "j",
+      "indicators": [
+        {
+          "name": "MA5 / MA20 / MA60",
+          "type": "ma",
+          "description": "5/20/60 均线用于趋势和风控"
+        },
+        {
+          "name": "DIF / DEA",
+          "type": "macd",
+          "description": "MACD 金叉、死叉与背离判断"
+        },
+        {
+          "name": "K / D / J",
+          "type": "kdj",
+          "description": "KDJ 双金双死和优先级判断"
+        },
+        {
+          "name": "VOL_MA5",
+          "type": "volume",
+          "description": "量价配合与放量确认"
+        }
+      ],
+      "buy_rules": [
+        "周线趋势向上：收盘在 20 周线之上，20 周线不弱于 60 周线，MACD / KDJ 不空头。",
+        "日线回踩企稳：日线仍在 20 日线上方，低点靠近 20 日线，收盘重新站稳 5 日线，量能不弱。",
+        "日线双金、60 分钟或 120 分钟双金，或 60 分钟底背离，作为精准买点。"
+      ],
+      "sell_rules": [
+        "周线双死或周线顶背离，优先视作大级别风险。",
+        "日线跌破 5 日线视作短线转弱，跌破 20 日线减仓，跌破 60 日线视作强风险离场。",
+        "日线顶背离出现，或 60/120 分钟双死出现，优先保护利润。"
+      ],
+      "notes": [
+        "这套策略是把博主方法拆成多个可组合组件，便于后续继续扩展。",
+        "当前版本已经支持多周期、双金双死、顶底背离、均线风控与量价过滤。",
+        "120 分钟和季线使用本地聚合数据计算，便于在当前项目中统一实现。"
+      ],
+      "components": [
+        {
+          "id": "weekly_trend",
+          "label": "周线趋势",
+          "timeframe": "1w",
+          "lookback_bars": 180,
+          "indicator_specs": {
+            "ma20": {
+              "type": "sma",
+              "source": "close",
+              "window": 20
+            },
+            "ma60": {
+              "type": "sma",
+              "source": "close",
+              "window": 60
+            },
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "pass": [
+              "close > ma20",
+              "ma20 >= ma60",
+              "dif >= dea",
+              "k >= d"
+            ],
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "double_dead": [
+              "cross_under('dif', 'dea')",
+              "cross_under('k', 'd')"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 48, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 48, 3, 4)"
+            ]
+          }
+        },
+        {
+          "id": "daily_wave",
+          "label": "日线波段",
+          "timeframe": "1d",
+          "lookback_bars": 220,
+          "indicator_specs": {
+            "ma5": {
+              "type": "sma",
+              "source": "close",
+              "window": 5
+            },
+            "ma20": {
+              "type": "sma",
+              "source": "close",
+              "window": 20
+            },
+            "ma60": {
+              "type": "sma",
+              "source": "close",
+              "window": 60
+            },
+            "vol_ma5": {
+              "type": "sma",
+              "source": "volume",
+              "window": 5
+            },
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "pass": [
+              "close >= ma20",
+              "close >= ma5",
+              "near('low', 'ma20', 0.02)",
+              "close >= open"
+            ],
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "volume_ok": [
+              "volume >= vol_ma5 * 0.92"
+            ],
+            "break_5": [
+              "close < ma5"
+            ],
+            "break_20": [
+              "close < ma20"
+            ],
+            "break_60": [
+              "close < ma60"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 60, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 60, 3, 4)"
+            ]
+          }
+        },
+        {
+          "id": "intraday_60m",
+          "label": "60分钟买点",
+          "timeframe": "60m",
+          "lookback_bars": 200,
+          "indicator_specs": {
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "double_dead": [
+              "cross_under('dif', 'dea')",
+              "cross_under('k', 'd')"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 60, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 60, 3, 4)"
+            ]
+          }
+        },
+        {
+          "id": "intraday_120m",
+          "label": "120分钟确认",
+          "timeframe": "120m",
+          "lookback_bars": 180,
+          "indicator_specs": {
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "double_dead": [
+              "cross_under('dif', 'dea')",
+              "cross_under('k', 'd')"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 60, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 60, 3, 4)"
+            ]
+          }
+        }
+      ],
+      "buy_all": [
+        "weekly_trend.pass",
+        "daily_wave.pass",
+        "daily_wave.volume_ok"
+      ],
+      "buy_any": [
+        "weekly_trend.bottom_div",
+        "daily_wave.bottom_div",
+        "daily_wave.double_gold",
+        "intraday_60m.double_gold",
+        "intraday_120m.double_gold",
+        "intraday_60m.bottom_div",
+        "intraday_120m.bottom_div"
+      ],
+      "sell_any": [
+        "weekly_trend.double_dead",
+        "weekly_trend.top_div",
+        "daily_wave.break_20",
+        "daily_wave.break_60",
+        "daily_wave.top_div",
+        "intraday_60m.double_dead",
+        "intraday_60m.top_div",
+        "intraday_120m.double_dead",
+        "intraday_120m.top_div"
+      ]
+    },
+    {
+      "id": "liu_divergence_60m",
+      "label": "刘昌松 · 60m 背离",
+      "description": "专门监控 60 分钟底背离与顶背离，便于做 T 和短线节奏。",
+      "type": "builtin",
+      "mode": "simple",
+      "timeframe": "60m",
+      "lookback_bars": 200,
+      "priority_indicator": "j",
+      "indicator_specs": [
+        {
+          "type": "macd",
+          "name": "dif",
+          "signal_name": "dea",
+          "hist_name": "macd_hist",
+          "source": "close"
+        },
+        {
+          "type": "kdj",
+          "k_name": "k",
+          "d_name": "d",
+          "j_name": "j",
+          "window": 9
+        }
+      ],
+      "indicators": [
+        {
+          "name": "DIF / DEA",
+          "type": "macd",
+          "description": "MACD 背离判断"
+        },
+        {
+          "name": "K / D / J",
+          "type": "kdj",
+          "description": "KDJ 用于观察强弱和优先级"
+        }
+      ],
+      "buy_rules_eval": [
+        "bullish_divergence('close', 'dif', 60, 3, 4)"
+      ],
+      "sell_rules_eval": [
+        "bearish_divergence('close', 'dif', 60, 3, 4)"
+      ],
+      "buy_rules": [
+        "60m 底背离：价格创新低，但 DIF 低点抬高"
+      ],
+      "sell_rules": [
+        "60m 顶背离：价格创新高，但 DIF 高点降低"
+      ],
+      "notes": [
+        "底背离通常对应 3-5 天反弹窗口，适合短线和做 T。",
+        "顶背离通常对应 3-5 天调整窗口，应优先减仓或收紧止盈。"
+      ]
+    },
+    {
+      "id": "liu_stock_pick_v1",
+      "label": "刘昌松选股 v1",
+      "description": "季线和月线给底部背景，日线放量穿多线作为启动确认。",
+      "type": "builtin",
+      "mode": "composite",
+      "timeframe": "1q · 1M · 1d",
+      "primary_component": "daily_breakout",
+      "priority_component": "daily_breakout",
+      "priority_indicator": "j",
+      "indicators": [
+        {
+          "name": "季线 MACD/KDJ",
+          "type": "quarterly",
+          "description": "筛选底部结构是否启动"
+        },
+        {
+          "name": "月线 MA5 / MACD",
+          "type": "monthly",
+          "description": "观察月线低吸区域与零轴状态"
+        },
+        {
+          "name": "日线 MA5 / MA20 / MA60 / VOL_MA5",
+          "type": "daily",
+          "description": "确认一阳穿多线和放量突破"
+        }
+      ],
+      "buy_rules": [
+        "季线 MACD/KDJ 金叉或多头占优，确认底部结构。",
+        "月线靠近 5 月均线，且 MACD 不弱于零轴并优先选择零轴上方。",
+        "日线一阳穿多线，实体阳线放量突破，作为启动确认。"
+      ],
+      "sell_rules": [
+        "日线跌回 20 日线下方，或者量能退潮且重新跌破 60 日线。"
+      ],
+      "notes": [
+        "这套策略更适合做选股和启动筛选，不追求特别高频的提示。",
+        "季线由 3 个连续月线聚合而来，便于在当前项目中统一计算。"
+      ],
+      "components": [
+        {
+          "id": "quarterly_base",
+          "label": "季线底部结构",
+          "timeframe": "1q",
+          "lookback_bars": 80,
+          "indicator_specs": {
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "pass": [
+              "dif >= dea",
+              "k >= d"
+            ]
+          }
+        },
+        {
+          "id": "monthly_value",
+          "label": "月线低吸区",
+          "timeframe": "1M",
+          "lookback_bars": 100,
+          "indicator_specs": {
+            "ma5": {
+              "type": "sma",
+              "source": "close",
+              "window": 5
+            },
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            }
+          },
+          "checks": {
+            "pass": [
+              "close >= ma5 * 0.95",
+              "close <= ma5 * 1.05",
+              "dif >= dea"
+            ]
+          }
+        },
+        {
+          "id": "daily_breakout",
+          "label": "日线启动确认",
+          "timeframe": "1d",
+          "lookback_bars": 220,
+          "indicator_specs": {
+            "ma5": {
+              "type": "sma",
+              "source": "close",
+              "window": 5
+            },
+            "ma20": {
+              "type": "sma",
+              "source": "close",
+              "window": 20
+            },
+            "ma60": {
+              "type": "sma",
+              "source": "close",
+              "window": 60
+            },
+            "vol_ma5": {
+              "type": "sma",
+              "source": "volume",
+              "window": 5
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "buy": [
+              "open <= ma20",
+              "close > ma5",
+              "close > ma20",
+              "close > ma60",
+              "close > open",
+              "volume > vol_ma5 * 1.2"
+            ],
+            "sell": [
+              "close < ma20"
+            ]
+          }
+        }
+      ],
+      "buy_all": [
+        "quarterly_base.pass",
+        "monthly_value.pass",
+        "daily_breakout.buy"
+      ],
+      "sell_any": [
+        "daily_breakout.sell"
+      ]
+    }
+  ]
+}

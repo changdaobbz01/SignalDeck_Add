@@ -56,6 +56,10 @@ const state = {
   availableSources: [...FALLBACK_SOURCES],
   availableStrategies: [],
   rulesPayload: null,
+  strategyConfigSeed: "",
+  strategyConfigStrategyId: "",
+  strategyConfigDirty: false,
+  strategyConfigHelpOpen: false,
   rulesModalOpen: false,
   webhookModalOpen: false,
   signalDrawerOpen: false,
@@ -76,6 +80,14 @@ const state = {
   lastWatchlistSignalRefreshAt: 0,
   watchlistStrategyTimer: null,
   watchlistScrollTimer: null,
+  alertRuntimeSyncTimer: null,
+  alertRuntimeSnapshot: null,
+  alertRuntimeUpdatedAt: "",
+  alertWorkerState: {},
+  alertRuntimeSyncError: "",
+  isLoadingAlertRuntime: false,
+  isApplyingAlertRuntime: false,
+  hasLoadedAlertRuntime: false,
 };
 
 const dom = {
@@ -88,7 +100,6 @@ const dom = {
   activeSourceLabel: document.getElementById("activeSourceLabel"),
   sourceSelect: document.getElementById("sourceSelect"),
   strategySelect: document.getElementById("strategySelect"),
-  strategyDeleteButton: document.getElementById("strategyDeleteButton"),
   rulesButton: document.getElementById("rulesButton"),
   webhookButton: document.getElementById("webhookButton"),
   webhookInput: document.getElementById("webhookInput"),
@@ -136,6 +147,7 @@ const dom = {
   signalDrawerBackdrop: document.getElementById("signalDrawerBackdrop"),
   signalDrawer: document.getElementById("signalDrawer"),
   signalDrawerClose: document.getElementById("signalDrawerClose"),
+  signalDrawerStrategyLabel: document.getElementById("signalDrawerStrategyLabel"),
   timeframeButtons: document.getElementById("timeframeButtons"),
   rulesBackdrop: document.getElementById("rulesBackdrop"),
   rulesModal: document.getElementById("rulesModal"),
@@ -147,18 +159,31 @@ const dom = {
   webhookSavedUrl: document.getElementById("webhookSavedUrl"),
   webhookSelectedCount: document.getElementById("webhookSelectedCount"),
   webhookLastResult: document.getElementById("webhookLastResult"),
+  webhookRuntimeSyncValue: document.getElementById("webhookRuntimeSyncValue"),
+  webhookRuntimeWorkerValue: document.getElementById("webhookRuntimeWorkerValue"),
+  webhookRuntimeLastScanValue: document.getElementById("webhookRuntimeLastScanValue"),
+  webhookRuntimeLastSentValue: document.getElementById("webhookRuntimeLastSentValue"),
+  webhookRuntimeHint: document.getElementById("webhookRuntimeHint"),
   webhookLogCount: document.getElementById("webhookLogCount"),
   webhookLogList: document.getElementById("webhookLogList"),
   rulesTimeframe: document.getElementById("rulesTimeframe"),
   rulesAdjust: document.getElementById("rulesAdjust"),
   rulesCurrentSource: document.getElementById("rulesCurrentSource"),
+  strategyConfigMeta: document.getElementById("strategyConfigMeta"),
+  strategyConfigInput: document.getElementById("strategyConfigInput"),
+  strategyConfigHelpButton: document.getElementById("strategyConfigHelpButton"),
+  strategyConfigHelpPanel: document.getElementById("strategyConfigHelpPanel"),
+  strategyConfigHelpContent: document.getElementById("strategyConfigHelpContent"),
+  strategyConfigFormatButton: document.getElementById("strategyConfigFormatButton"),
+  strategyConfigResetButton: document.getElementById("strategyConfigResetButton"),
+  strategyConfigSaveButton: document.getElementById("strategyConfigSaveButton"),
+  strategyConfigMessage: document.getElementById("strategyConfigMessage"),
+  strategyComponentsList: document.getElementById("strategyComponentsList"),
+  strategyComponentStatusList: document.getElementById("strategyComponentStatusList"),
   indicatorList: document.getElementById("indicatorList"),
   buyRulesList: document.getElementById("buyRulesList"),
   sellRulesList: document.getElementById("sellRulesList"),
   rulesNotes: document.getElementById("rulesNotes"),
-  customRuleInput: document.getElementById("customRuleInput"),
-  customRuleSaveButton: document.getElementById("customRuleSaveButton"),
-  customRuleMessage: document.getElementById("customRuleMessage"),
 };
 
 function defaultWatchlistItems() {
@@ -325,13 +350,20 @@ function normalizeWatchlistStrategySignal(payload) {
   const signal = String(payload?.signal || "").trim().toUpperCase();
   return {
     symbol,
+    name: String(payload?.name || "").trim(),
     signal,
     triggered: Boolean(payload?.triggered),
     strategy_id: normalizeStrategyValue(payload?.strategy?.id),
+    strategy: payload?.strategy && typeof payload.strategy === "object" ? payload.strategy : null,
+    source: payload?.source && typeof payload.source === "object" ? payload.source : null,
+    priority: payload?.priority && typeof payload.priority === "object" ? payload.priority : {},
     priority_label: String(payload?.priority?.label || "").trim(),
     priority_score: Number(payload?.priority?.score),
+    indicators: payload?.indicators && typeof payload.indicators === "object" ? payload.indicators : {},
     timestamp: payload?.timestamp || null,
     reason: String(payload?.reason || "").trim(),
+    details: payload?.details && typeof payload.details === "object" ? payload.details : {},
+    alert_key: payload?.alert_key || null,
   };
 }
 
@@ -427,6 +459,12 @@ function watchlistStrategySignalClass(signal) {
   if (normalized === "sell") return "sell";
   if (normalized === "hold") return "hold";
   return "neutral";
+}
+
+function watchlistStrategySignalLabel(strategySignal) {
+  const rawTimeframe = String(strategySignal?.strategy?.timeframe || "").trim();
+  const prefix = rawTimeframe && !rawTimeframe.includes("·") && !rawTimeframe.includes("/") ? rawTimeframe : "STRAT";
+  return `${prefix} ${String(strategySignal?.signal || "--").toUpperCase()}`;
 }
 
 function finiteOrFallback(value, fallback = -Infinity) {
@@ -563,6 +601,7 @@ function loadWatchlistModel() {
 
 function saveWatchlistModel() {
   localStorage.setItem("signal-deck-watchlist", JSON.stringify(state.watchlistModel));
+  scheduleAlertRuntimeSync({ delayMs: 250, silent: true });
 }
 
 function currentGroupName() {
@@ -660,6 +699,7 @@ function saveWebhookUrlPreference() {
   } catch (error) {
     console.error(error);
   }
+  scheduleAlertRuntimeSync({ delayMs: 0, silent: true });
 }
 
 function loadWebhookLogs() {
@@ -707,6 +747,7 @@ function saveWebhookAlertSymbols() {
   } catch (error) {
     console.error(error);
   }
+  scheduleAlertRuntimeSync({ delayMs: 150, silent: true });
 }
 
 function loadWebhookAlertStates() {
@@ -727,6 +768,208 @@ function saveWebhookAlertStates() {
   }
 }
 
+function buildAlertRuntimeRequestPayload() {
+  return {
+    watchlist: {
+      items: currentGroupItems().map((item) => ({
+        symbol: String(item?.symbol || "").trim().toLowerCase(),
+        name: String(item?.name || "").trim(),
+        trade_cycle: String(item?.trade_cycle || "").trim(),
+      })),
+    },
+    strategy: normalizeStrategyValue(state.strategy),
+    source: state.source,
+    webhook: {
+      url: String(state.webhookUrl || "").trim(),
+      enabled_symbols: [...state.webhookAlertSymbols].map((symbol) => String(symbol || "").trim().toLowerCase()).filter(Boolean),
+    },
+  };
+}
+
+function normalizeAlertRuntimeSnapshot(raw) {
+  const payload = raw && typeof raw === "object" ? raw : {};
+  const watchlist = payload.watchlist && typeof payload.watchlist === "object" ? payload.watchlist : {};
+  const webhook = payload.webhook && typeof payload.webhook === "object" ? payload.webhook : {};
+  const items = Array.isArray(watchlist.items) ? watchlist.items : [];
+  const enabledSymbols = Array.isArray(webhook.enabled_symbols) ? webhook.enabled_symbols : [];
+  return {
+    watchlist: {
+      items: items.map((item) => ({
+        symbol: String(item?.symbol || "").trim().toLowerCase(),
+        name: String(item?.name || "").trim(),
+        trade_cycle: String(item?.trade_cycle || "").trim(),
+      })),
+    },
+    strategy: normalizeStrategyValue(payload.strategy),
+    source: String(payload.source || "").trim() || "auto",
+    webhook: {
+      url: String(webhook.url || "").trim(),
+      enabled_symbols: enabledSymbols
+        .map((symbol) => String(symbol || "").trim().toLowerCase())
+        .filter(Boolean)
+        .sort(),
+    },
+  };
+}
+
+function alertRuntimeSnapshotsMatch(left, right) {
+  if (!left || !right) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isAlertRuntimeSynced() {
+  if (!state.hasLoadedAlertRuntime || !state.alertRuntimeSnapshot) {
+    return false;
+  }
+  return alertRuntimeSnapshotsMatch(
+    normalizeAlertRuntimeSnapshot(buildAlertRuntimeRequestPayload()),
+    state.alertRuntimeSnapshot
+  );
+}
+
+function persistAlertRuntimeLocally() {
+  try {
+    localStorage.setItem("signal-deck-watchlist", JSON.stringify(state.watchlistModel));
+    localStorage.setItem("signal-deck-webhook-url", state.webhookUrl || "");
+    localStorage.setItem("signal-deck-webhook-symbols", JSON.stringify([...state.webhookAlertSymbols]));
+    localStorage.setItem("signal-deck-webhook-states", JSON.stringify(state.webhookAlertStates || {}));
+    localStorage.setItem("signal-deck-webhook-logs", JSON.stringify((state.webhookLogs || []).slice(0, 80)));
+    localStorage.setItem("signal-deck-source", state.source || "auto");
+    localStorage.setItem("signal-deck-strategy", normalizeStrategyValue(state.strategy));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function applyAlertRuntimePayload(payload) {
+  if (!payload || typeof payload !== "object") return;
+  const webhook = payload?.webhook && typeof payload.webhook === "object" ? payload.webhook : {};
+  state.isApplyingAlertRuntime = true;
+  try {
+    if (payload.watchlist) {
+      state.watchlistModel = normalizeWatchlistModel(payload.watchlist);
+    }
+    if (payload.source) {
+      state.source = String(payload.source || "").trim() || state.source;
+    }
+    if (payload.strategy) {
+      state.strategy = normalizeStrategyValue(payload.strategy);
+    }
+    state.webhookUrl = String(webhook.url || "").trim();
+    state.webhookAlertSymbols = new Set(
+      (Array.isArray(webhook.enabled_symbols) ? webhook.enabled_symbols : [])
+        .map((symbol) => String(symbol || "").trim().toLowerCase())
+        .filter(Boolean)
+    );
+    state.webhookAlertStates =
+      webhook.alert_states && typeof webhook.alert_states === "object" && !Array.isArray(webhook.alert_states)
+        ? webhook.alert_states
+        : {};
+    state.webhookLogs = Array.isArray(webhook.logs) ? webhook.logs : [];
+    state.alertRuntimeSnapshot = normalizeAlertRuntimeSnapshot(payload);
+    state.alertRuntimeUpdatedAt = String(payload.updated_at || "").trim();
+    state.alertWorkerState = payload.worker && typeof payload.worker === "object" ? payload.worker : {};
+    state.alertRuntimeSyncError = "";
+    persistAlertRuntimeLocally();
+    state.hasLoadedAlertRuntime = true;
+  } finally {
+    state.isApplyingAlertRuntime = false;
+  }
+}
+
+function alertRuntimeHasRemoteData(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const webhook = payload?.webhook && typeof payload.webhook === "object" ? payload.webhook : {};
+  const items = Array.isArray(payload?.watchlist?.items) ? payload.watchlist.items : [];
+  return Boolean(
+    items.length ||
+      String(webhook.url || "").trim() ||
+      (Array.isArray(webhook.enabled_symbols) && webhook.enabled_symbols.length > 0) ||
+      (Array.isArray(webhook.logs) && webhook.logs.length > 0) ||
+      normalizeStrategyValue(payload.strategy) !== normalizeStrategyValue(window.APP_DEFAULTS.strategy) ||
+      String(payload.source || "").trim() !== String(window.APP_DEFAULTS.source || "auto").trim()
+  );
+}
+
+async function syncAlertRuntimeState(options = {}) {
+  const { silent = true } = options;
+  if (state.isApplyingAlertRuntime) {
+    return null;
+  }
+  const response = await fetch("/api/alert-runtime", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildAlertRuntimeRequestPayload()),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    state.alertRuntimeSyncError = payload.error || "Alert runtime sync failed";
+    throw new Error(payload.error || "Alert runtime sync failed");
+  }
+  applyAlertRuntimePayload(payload);
+  state.alertRuntimeSyncError = "";
+  if (!silent) {
+    setRefreshStatus("后台预警配置已同步");
+  }
+  if (state.webhookModalOpen) {
+    renderWebhookPanel({ syncInput: true });
+  }
+  return payload;
+}
+
+function scheduleAlertRuntimeSync(options = {}) {
+  const { delayMs = 300, silent = true } = options;
+  if (state.isApplyingAlertRuntime) {
+    return;
+  }
+  if (state.webhookModalOpen) {
+    renderWebhookPanel({ syncInput: false });
+  }
+  if (state.alertRuntimeSyncTimer) {
+    clearTimeout(state.alertRuntimeSyncTimer);
+  }
+  state.alertRuntimeSyncTimer = window.setTimeout(() => {
+    state.alertRuntimeSyncTimer = null;
+    syncAlertRuntimeState({ silent }).catch((error) => {
+      console.error(error);
+      state.alertRuntimeSyncError = error.message || "Alert runtime sync failed";
+      if (state.webhookModalOpen) {
+        renderWebhookPanel({ syncInput: false });
+      }
+      if (!silent) {
+        setRefreshStatus(error.message || "后台预警配置同步失败");
+      }
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+async function loadAlertRuntimeState() {
+  if (state.isLoadingAlertRuntime) {
+    return null;
+  }
+  state.isLoadingAlertRuntime = true;
+  try {
+    const response = await fetch("/api/alert-runtime");
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      state.alertRuntimeSyncError = payload.error || "Load alert runtime failed";
+      throw new Error(payload.error || "Load alert runtime failed");
+    }
+    if (alertRuntimeHasRemoteData(payload)) {
+      applyAlertRuntimePayload(payload);
+      return payload;
+    }
+    await syncAlertRuntimeState({ silent: true });
+    return payload;
+  } catch (error) {
+    console.error(error);
+    state.alertRuntimeSyncError = error.message || "Load alert runtime failed";
+    return null;
+  } finally {
+    state.isLoadingAlertRuntime = false;
+  }
+}
+
 function loadSourcePreference(fallback) {
   try {
     return localStorage.getItem("signal-deck-source") || fallback || "auto";
@@ -738,6 +981,7 @@ function loadSourcePreference(fallback) {
 
 function saveSourcePreference() {
   localStorage.setItem("signal-deck-source", state.source);
+  scheduleAlertRuntimeSync({ delayMs: 0, silent: true });
 }
 
 function normalizeStrategyValue(value) {
@@ -755,6 +999,7 @@ function loadStrategyPreference(fallback) {
 
 function saveStrategyPreference() {
   localStorage.setItem("signal-deck-strategy", normalizeStrategyValue(state.strategy));
+  scheduleAlertRuntimeSync({ delayMs: 0, silent: true });
 }
 
 function normalizeWatchlistSortMode(value) {
@@ -1045,6 +1290,503 @@ function setRefreshStatus(message) {
   dom.refreshStatus.textContent = message;
 }
 
+function isStrategyEditable(value = state.strategy) {
+  const strategy = getStrategyMeta(value);
+  return Boolean(strategy?.editable && normalizeStrategyValue(strategy.id) !== "none");
+}
+
+function updateStrategyDeleteButtonState() {
+  return;
+}
+
+function setStrategyConfigMessage(message, tone = "neutral") {
+  if (!dom.strategyConfigMessage) return;
+  dom.strategyConfigMessage.textContent = message || "";
+  dom.strategyConfigMessage.classList.toggle("error", tone === "error");
+  dom.strategyConfigMessage.classList.toggle("success", tone === "success");
+}
+
+function setStrategyConfigControlsDisabled(disabled) {
+  [dom.strategyConfigInput, dom.strategyConfigFormatButton, dom.strategyConfigResetButton, dom.strategyConfigSaveButton].forEach((node) => {
+    if (node) {
+      node.disabled = Boolean(disabled);
+    }
+  });
+}
+
+function strategyConfigModeLabel(mode) {
+  return String(mode || "").trim().toLowerCase() === "simple" ? "单周期策略" : "组合策略";
+}
+
+function formatStrategyConfigHelpRefs(refs = []) {
+  const items = Array.isArray(refs) ? refs.filter(Boolean) : [];
+  return items.length ? items.join(" / ") : "当前未配置";
+}
+
+function setStrategyConfigHelpOpen(open) {
+  state.strategyConfigHelpOpen = Boolean(open);
+  if (dom.strategyConfigHelpPanel) {
+    dom.strategyConfigHelpPanel.classList.toggle("hidden", !state.strategyConfigHelpOpen);
+    dom.strategyConfigHelpPanel.setAttribute("aria-hidden", state.strategyConfigHelpOpen ? "false" : "true");
+  }
+  if (dom.strategyConfigHelpButton) {
+    dom.strategyConfigHelpButton.classList.toggle("active", state.strategyConfigHelpOpen);
+    dom.strategyConfigHelpButton.setAttribute("aria-expanded", state.strategyConfigHelpOpen ? "true" : "false");
+    dom.strategyConfigHelpButton.textContent = state.strategyConfigHelpOpen ? "收起说明" : "参数说明";
+  }
+}
+
+function createStrategyConfigHelpCard(item = {}) {
+  const card = document.createElement("article");
+  card.className = "strategy-config-help-card";
+
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = item.title || "--";
+  header.appendChild(title);
+
+  if (item.tag) {
+    const tag = document.createElement("span");
+    tag.className = "strategy-config-help-tag";
+    tag.textContent = item.tag;
+    header.appendChild(tag);
+  }
+  card.appendChild(header);
+
+  const description = document.createElement("p");
+  description.textContent = item.description || "";
+  card.appendChild(description);
+
+  if (item.example) {
+    const example = document.createElement("p");
+    example.className = "strategy-config-help-example";
+    example.append("示例：");
+    const code = document.createElement("code");
+    code.textContent = item.example;
+    example.appendChild(code);
+    card.appendChild(example);
+  }
+
+  if (item.note) {
+    const note = document.createElement("p");
+    note.className = "strategy-config-help-note";
+    note.textContent = item.note;
+    card.appendChild(note);
+  }
+
+  return card;
+}
+
+function buildStrategyConfigHelpSections(payload) {
+  const config = payload?.config && typeof payload.config === "object" ? payload.config : {};
+  const strategy = payload?.strategy || {};
+  const mode = String(config.mode || strategy.mode || (Array.isArray(config.components) ? "composite" : "simple")).trim().toLowerCase() || "simple";
+  const components = Array.isArray(config.components) ? config.components : [];
+  const topLevelKeys = Object.keys(config);
+  const componentIds = components.map((item) => String(item?.id || "").trim()).filter(Boolean);
+  const currentStrategyName = String(config.label || strategy.label || config.id || strategy.id || "--").trim();
+  const currentStrategyId = String(config.id || strategy.id || "--").trim();
+  const bannerText = mode === "composite"
+    ? "先看组合逻辑，再改阈值。通常把趋势过滤写进 buy_all / sell_all，把真正的买卖触发写进 buy_any / sell_any。"
+    : "先确认指标和公式，再改阈值。单周期策略直接在当前周期里用表达式判断买卖。";
+
+  const sections = [
+    {
+      title: "先看整体",
+      description: "这一层决定策略叫什么、属于哪种模式，以及最后如何把多个条件拼成买卖信号。",
+      items: [
+        {
+          title: "id",
+          tag: "root",
+          description: "策略内部唯一标识。保存本机覆盖配置、切换策略和 WebHook 输出时都会用到它。",
+          example: currentStrategyId,
+        },
+        {
+          title: "label",
+          tag: "root",
+          description: "页面上展示给用户看的名称，可以写成更易懂的中文名字。",
+          example: currentStrategyName,
+        },
+        {
+          title: "description",
+          tag: "root",
+          description: "一句话介绍这套策略的核心思想，适合写给使用者看。",
+          example: String(config.description || strategy.description || "周线定方向，日线定波段，60/120 分钟找买卖点"),
+        },
+        {
+          title: "mode",
+          tag: "root",
+          description: "simple 表示单周期直接判断；composite 表示由多个组件组合成最终信号。",
+          example: mode,
+          note: `当前是 ${strategyConfigModeLabel(mode)}。`,
+        },
+        {
+          title: "timeframe",
+          tag: "root",
+          description: "给用户看的策略周期说明。组合策略通常会写成多个周期的概览文字。",
+          example: String(config.timeframe || strategy.timeframe || "--"),
+        },
+        {
+          title: "notes",
+          tag: "root",
+          description: "补充说明区，适合写这套策略的适用场景、风险提示和调参建议。",
+          example: "notes: [\"适合强势行情\", \"跌破 20 日线先减仓\"]",
+        },
+      ],
+    },
+  ];
+
+  if (mode === "composite") {
+    sections.push({
+      title: "组合逻辑",
+      description: "组合策略不是直接写 BUY/SELL 公式，而是先定义组件和检查项，再通过 buy_all / buy_any / sell_all / sell_any 来拼装。",
+      items: [
+        {
+          title: "components",
+          tag: "combo",
+          description: "组件列表。每个组件通常对应一个周期或一个独立观察角度，比如周线趋势、日线波段、60 分钟买点。",
+          example: componentIds.length ? componentIds.join(", ") : "weekly_trend, daily_wave, intraday_60m",
+          note: `当前共 ${components.length || 0} 个组件。`,
+        },
+        {
+          title: "buy_all",
+          tag: "combo",
+          description: "买入时必须全部满足的条件，适合放趋势过滤、环境过滤这类硬门槛。",
+          example: formatStrategyConfigHelpRefs(config.buy_all),
+        },
+        {
+          title: "buy_any",
+          tag: "combo",
+          description: "买入时命中任意一个即可，适合放具体触发器，比如双金、底背离、放量突破。",
+          example: formatStrategyConfigHelpRefs(config.buy_any),
+        },
+        {
+          title: "sell_all / sell_any",
+          tag: "combo",
+          description: "卖出逻辑同理。sell_all 是必须同时满足，sell_any 是任意一个命中就触发风险或卖出。",
+          example: `sell_all: ${formatStrategyConfigHelpRefs(config.sell_all)} | sell_any: ${formatStrategyConfigHelpRefs(config.sell_any)}`,
+        },
+        {
+          title: "primary_component",
+          tag: "combo",
+          description: "最终信号默认取哪个组件的时间戳和行情名片，通常选最核心的触发组件。",
+          example: String(config.primary_component || strategy.primary_component || "main"),
+        },
+        {
+          title: "priority_component / priority_indicator",
+          tag: "combo",
+          description: "优先级评分从哪个组件、哪个指标取值。常用来决定列表排序和信号强弱展示。",
+          example: `${String(config.priority_component || strategy.priority_component || "main")} + ${String(config.priority_indicator || strategy.priority_indicator || "j")}`,
+        },
+      ],
+    });
+  } else {
+    sections.push({
+      title: "单周期写法",
+      description: "simple 模式没有组件引用，直接在当前周期里配置指标和买卖表达式。",
+      items: [
+        {
+          title: "indicator_specs",
+          tag: "simple",
+          description: "先定义会用到的指标，后面的表达式才能引用这些名字。",
+          example: "indicator_specs: [{\"name\":\"ma20\",\"type\":\"sma\",\"source\":\"close\",\"window\":20}]",
+        },
+        {
+          title: "buy_rules_eval",
+          tag: "simple",
+          description: "买入表达式列表。每一条都会被计算，通常写价格位置、金叉、放量等条件。",
+          example: "buy_rules_eval: [\"close >= ma20\", \"cross_over('dif', 'dea')\"]",
+        },
+        {
+          title: "sell_rules_eval",
+          tag: "simple",
+          description: "卖出表达式列表，写法和 buy_rules_eval 相同。",
+          example: "sell_rules_eval: [\"close < ma20\", \"cross_under('k', 'd')\"]",
+        },
+        {
+          title: "priority_indicator",
+          tag: "simple",
+          description: "决定信号面板里优先显示哪个指标的分数或数值。",
+          example: String(config.priority_indicator || strategy.priority_indicator || "j"),
+        },
+      ],
+    });
+  }
+
+  sections.push(
+    {
+      title: "组件字段",
+      description: "组件内部的字段主要用来指定周期、回看长度、指标定义和检查项命名。",
+      items: [
+        {
+          title: "components[].id",
+          tag: "component",
+          description: "组件唯一名字。后面在 buy_all / buy_any 里会用 组件id.检查id 的格式引用它。",
+          example: componentIds[0] ? `${componentIds[0]}.pass` : "weekly_trend.pass",
+        },
+        {
+          title: "components[].label",
+          tag: "component",
+          description: "展示给用户看的组件名，建议写成易懂的中文，比如“日线波段”“60 分钟买点”。",
+          example: String(components[0]?.label || "60分钟买点"),
+        },
+        {
+          title: "components[].timeframe",
+          tag: "component",
+          description: "这个组件实际拉取哪个周期的数据。当前引擎支持 1m/5m/15m/30m/60m/120m/1d/1w/1M/1q。",
+          example: String(components[0]?.timeframe || "60m"),
+        },
+        {
+          title: "components[].lookback_bars",
+          tag: "component",
+          description: "为了计算指标和背离，需要往前取多少根 K 线。值越大越稳，但计算会更慢。",
+          example: String(components[0]?.lookback_bars || 180),
+          note: "建议不要低于 60，否则均线、背离和交叉更容易失真。",
+        },
+        {
+          title: "components[].indicator_specs",
+          tag: "component",
+          description: "这个组件会先算哪些指标。这里定义的名字，后面的 checks 才能直接引用。",
+          example: "indicator_specs: {\"ma20\":{\"type\":\"sma\",\"source\":\"close\",\"window\":20}}",
+        },
+        {
+          title: "components[].checks",
+          tag: "component",
+          description: "检查项集合。每个检查项里可以放多条表达式，全部为 true 才算这个检查项通过。",
+          example: "checks: {\"pass\": [\"close > ma20\"], \"double_gold\": [\"cross_over('dif', 'dea')\", \"cross_over('k', 'd')\"]}",
+        },
+      ],
+    },
+    {
+      title: "常用指标参数",
+      description: "指标定义写在 indicator_specs 里。最关键的是 type、name/source 和不同指标自己的窗口参数。",
+      items: [
+        {
+          title: "SMA / EMA",
+          tag: "indicator",
+          description: "均线最常用。source 通常是 close，window 是周期长度。",
+          example: "{\"name\":\"ma20\",\"type\":\"sma\",\"source\":\"close\",\"window\":20}",
+        },
+        {
+          title: "MACD",
+          tag: "indicator",
+          description: "会同时产出主线、信号线和柱体。可以自定义 fast / slow / signal 以及输出名字。",
+          example: "{\"name\":\"dif\",\"type\":\"macd\",\"source\":\"close\",\"signal_name\":\"dea\",\"hist_name\":\"macd_hist\"}",
+        },
+        {
+          title: "KDJ",
+          tag: "indicator",
+          description: "window 是 RSV 窗口，k_name / d_name / j_name 是输出变量名。",
+          example: "{\"type\":\"kdj\",\"window\":9,\"k_name\":\"k\",\"d_name\":\"d\",\"j_name\":\"j\"}",
+        },
+        {
+          title: "RSI / ATR",
+          tag: "indicator",
+          description: "RSI 适合强弱过滤，ATR 适合波动率过滤或止损线。",
+          example: "{\"name\":\"rsi14\",\"type\":\"rsi\",\"source\":\"close\",\"window\":14}",
+        },
+        {
+          title: "Bollinger",
+          tag: "indicator",
+          description: "布林带会自动生成 upper / mid / lower 三条线，适合看通道突破或回踩。",
+          example: "{\"name\":\"boll\",\"type\":\"bollinger\",\"source\":\"close\",\"window\":20,\"stddev\":2}",
+        },
+        {
+          title: "source / name",
+          tag: "indicator",
+          description: "source 指指标基于哪条序列计算，name 或 k_name/d_name/j_name 决定后面公式里怎么引用。",
+          example: "source 可用 close/open/high/low/volume/amount",
+        },
+      ],
+    },
+    {
+      title: "表达式怎么写",
+      description: "规则表达式使用 Python 风格写法。运算符请用 and / or / not，不要写成 && / ||。",
+      items: [
+        {
+          title: "基础变量",
+          tag: "expr",
+          description: "开高低收量额会自动注入到规则里，指标名字也会自动成为变量。",
+          example: "close >= ma20 and volume >= vol_ma5 * 0.9",
+        },
+        {
+          title: "上一根值 prev_xxx",
+          tag: "expr",
+          description: "系统会自动生成上一根的值，比如 prev_close、prev_dif、prev_k，可以拿来做拐点或延续判断。",
+          example: "close > ma20 and prev_close <= prev_ma20",
+        },
+        {
+          title: "cross_over(left, right)",
+          tag: "expr",
+          description: "判断 left 是否刚刚向上金叉 right，本质是“当前在上、上一根还没在上”。",
+          example: "cross_over('dif', 'dea')",
+        },
+        {
+          title: "cross_under(left, right)",
+          tag: "expr",
+          description: "判断 left 是否刚刚向下死叉 right，常用于风险提示或卖出。",
+          example: "cross_under('k', 'd')",
+        },
+        {
+          title: "near(left, right, pct)",
+          tag: "expr",
+          description: "判断两个值是否足够接近。常用来描述“回踩 20 日线附近”。pct 填 0.02 就代表 2% 以内。",
+          example: "near('low', 'ma20', 0.02)",
+        },
+        {
+          title: "bullish_divergence(...)",
+          tag: "expr",
+          description: "底背离检测。参数依次是价格序列、指标序列、回看根数、拐点窗口、两个低点最小间隔。",
+          example: "bullish_divergence('close', 'dif', 60, 3, 4)",
+          note: "lookback 越大看得越远；pivot_window 越大越保守；min_separation 越大越不容易把两个太近的低点当成背离。",
+        },
+        {
+          title: "bearish_divergence(...)",
+          tag: "expr",
+          description: "顶背离检测，参数意义和底背离相同，只是比较的是两个高点。",
+          example: "bearish_divergence('close', 'dif', 60, 3, 4)",
+        },
+        {
+          title: "辅助函数",
+          tag: "expr",
+          description: "当前还支持 abs / min / max / round，可以配合数值过滤一起使用。",
+          example: "abs(dif - dea) <= 0.03",
+        },
+      ],
+    }
+  );
+
+  if (topLevelKeys.length || componentIds.length) {
+    sections.push({
+      title: "当前策略对照",
+      description: "下面这些示例直接取自你当前打开的策略，适合边看边改。",
+      items: [
+        {
+          title: "顶层键",
+          tag: "current",
+          description: "这是当前这份 JSON 已经存在的顶层字段，新增字段时最好先确认是否真的被引擎支持。",
+          example: topLevelKeys.length ? topLevelKeys.join(", ") : "id, label, mode, components",
+        },
+        {
+          title: "当前组件",
+          tag: "current",
+          description: "这些组件名可以直接用于 buy_all / buy_any / sell_all / sell_any 的引用。",
+          example: componentIds.length ? componentIds.join(" / ") : "main",
+        },
+        {
+          title: "当前买入组合",
+          tag: "current",
+          description: "如果你想让策略更严格，优先调整 buy_all；想增加新的触发器，就往 buy_any 里加引用。",
+          example: `buy_all: ${formatStrategyConfigHelpRefs(config.buy_all)} | buy_any: ${formatStrategyConfigHelpRefs(config.buy_any)}`,
+        },
+        {
+          title: "当前卖出组合",
+          tag: "current",
+          description: "卖出通常建议保持更直接，尤其是破位、双死、顶背离这类风险项。",
+          example: `sell_all: ${formatStrategyConfigHelpRefs(config.sell_all)} | sell_any: ${formatStrategyConfigHelpRefs(config.sell_any)}`,
+        },
+      ],
+    });
+  }
+
+  return {
+    bannerText,
+    badges: [
+      { label: "当前策略", value: currentStrategyName },
+      { label: "模式", value: strategyConfigModeLabel(mode) },
+      { label: "组件数", value: String(components.length || (mode === "simple" ? 1 : 0)) },
+    ],
+    sections,
+  };
+}
+
+function renderStrategyConfigHelp(payload) {
+  if (!dom.strategyConfigHelpContent) return;
+
+  const help = buildStrategyConfigHelpSections(payload);
+  dom.strategyConfigHelpContent.innerHTML = "";
+
+  const banner = document.createElement("section");
+  banner.className = "strategy-config-help-banner";
+  const intro = document.createElement("p");
+  intro.textContent = help.bannerText;
+  banner.appendChild(intro);
+
+  const badges = document.createElement("div");
+  badges.className = "strategy-config-help-badges";
+  help.badges.forEach((item) => {
+    const badge = document.createElement("span");
+    badge.className = "strategy-config-help-badge";
+    const label = document.createElement("span");
+    label.textContent = `${item.label}`;
+    const value = document.createElement("strong");
+    value.textContent = item.value;
+    badge.appendChild(label);
+    badge.appendChild(value);
+    badges.appendChild(badge);
+  });
+  banner.appendChild(badges);
+  dom.strategyConfigHelpContent.appendChild(banner);
+
+  help.sections.forEach((section) => {
+    const wrapper = document.createElement("section");
+    wrapper.className = "strategy-config-help-section";
+
+    const heading = document.createElement("div");
+    heading.className = "strategy-config-help-heading";
+    const title = document.createElement("h4");
+    title.textContent = section.title || "--";
+    heading.appendChild(title);
+    if (section.description) {
+      const description = document.createElement("p");
+      description.textContent = section.description;
+      heading.appendChild(description);
+    }
+    wrapper.appendChild(heading);
+
+    const grid = document.createElement("div");
+    grid.className = "strategy-config-help-grid";
+    (section.items || []).forEach((item) => {
+      grid.appendChild(createStrategyConfigHelpCard(item));
+    });
+    wrapper.appendChild(grid);
+    dom.strategyConfigHelpContent.appendChild(wrapper);
+  });
+
+  setStrategyConfigHelpOpen(state.strategyConfigHelpOpen);
+}
+
+function renderStrategyConfigEditor(payload) {
+  if (!dom.strategyConfigInput || !dom.strategyConfigMeta) return;
+
+  const config = payload?.config || {};
+  const meta = payload?.config_meta || {};
+  const strategyId = normalizeStrategyValue(payload?.strategy?.id);
+  const nextText = JSON.stringify(config, null, 2);
+  const strategyChanged = state.strategyConfigStrategyId !== strategyId;
+  const configChanged = state.strategyConfigSeed !== nextText;
+  const editable = Boolean(meta.editable && normalizeStrategyValue(payload?.strategy?.id) !== "none");
+  const sourceText = meta.is_overridden ? "当前使用本机覆盖配置。" : "当前使用内置基础配置。";
+  dom.strategyConfigMeta.textContent = editable
+    ? `${sourceText} 你可以直接修改 JSON 并保存，恢复默认会回到内置刘昌松策略。`
+    : "当前策略不支持编辑。";
+  if (strategyChanged || configChanged || !state.strategyConfigDirty) {
+    dom.strategyConfigInput.value = nextText;
+    state.strategyConfigSeed = nextText;
+    state.strategyConfigStrategyId = strategyId;
+    state.strategyConfigDirty = false;
+  }
+  setStrategyConfigControlsDisabled(!editable);
+
+  if (!editable) {
+    setStrategyConfigMessage("请选择可编辑的刘昌松策略。");
+    return;
+  }
+  if (!dom.strategyConfigMessage.classList.contains("error")) {
+    setStrategyConfigMessage(meta.is_overridden ? "已启用本机覆盖配置。" : "当前显示内置基础配置。");
+  }
+}
+
 function formatSigned(value, digits = 2) {
   const num = Number(value || 0);
   const sign = num > 0 ? "+" : "";
@@ -1221,6 +1963,651 @@ function renderChipList(container, items, emptyText) {
   });
 }
 
+function isStrategyRiskCheck(checkId) {
+  const normalized = String(checkId || "").trim().toLowerCase();
+  return normalized.includes("dead") || normalized.includes("top_div") || normalized.startsWith("break_") || normalized === "sell";
+}
+
+function summarizeStrategyRules(rules = []) {
+  const list = Array.isArray(rules) ? rules.filter(Boolean) : [];
+  if (list.length === 0) return "无规则";
+  return list.join(" + ");
+}
+
+function strategyCheckLabel(checkId) {
+  const normalized = String(checkId || "").trim().toLowerCase();
+  const mapping = {
+    pass: "趋势通过",
+    buy: "买入条件",
+    sell: "卖出条件",
+    buy_ready: "买入就绪",
+    sell_ready: "卖出就绪",
+    double_gold: "双金",
+    double_dead: "双死",
+    bottom_div: "底背离",
+    top_div: "顶背离",
+    volume_ok: "量能确认",
+    break_5: "跌破 5 日线",
+    break_20: "跌破 20 日线",
+    break_60: "跌破 60 日线",
+  };
+  return mapping[normalized] || normalized.replace(/_/g, " ");
+}
+
+function formatDecisionEntryLabel(entry) {
+  const componentLabel = String(entry?.component_label || entry?.component_id || "").trim();
+  const checkLabel = strategyCheckLabel(entry?.check_id);
+  if (componentLabel && checkLabel) {
+    return `${componentLabel}·${checkLabel}`;
+  }
+  if (componentLabel) {
+    return componentLabel;
+  }
+  if (checkLabel) {
+    return checkLabel;
+  }
+  return String(entry?.ref || "").trim();
+}
+
+function summarizeDecisionEntries(entries = []) {
+  const labels = (Array.isArray(entries) ? entries : [])
+    .map((entry) => formatDecisionEntryLabel(entry))
+    .filter(Boolean);
+  return labels.join(" + ");
+}
+
+function strategyDisplayTimeframe(payload) {
+  const strategyTimeframe = String(payload?.strategy?.timeframe || "").trim();
+  if (!strategyTimeframe) {
+    return state.timeframe;
+  }
+  if (strategyTimeframe.includes("路") || strategyTimeframe.includes("/") || strategyTimeframe.includes("·")) {
+    return state.timeframe;
+  }
+  return strategyTimeframe;
+}
+
+function resolveStrategyDecisionState(payload) {
+  const decision = payload?.details?.decision;
+  if (!decision || typeof decision !== "object") {
+    return null;
+  }
+
+  let side = String(decision.active_side || "").trim().toLowerCase();
+  const signal = String(payload?.signal || "").trim().toUpperCase();
+  if (!["buy", "sell"].includes(side)) {
+    if (signal === "BUY") side = "buy";
+    if (signal === "SELL") side = "sell";
+  }
+  if (!["buy", "sell"].includes(side)) {
+    return null;
+  }
+
+  const group = decision?.[side];
+  if (!group || typeof group !== "object") {
+    return null;
+  }
+
+  return { side, group };
+}
+
+function buildStrategyDecisionText(payload) {
+  const resolved = resolveStrategyDecisionState(payload);
+  if (!resolved) {
+    return "";
+  }
+
+  const { side, group } = resolved;
+  const title = side === "sell" ? "卖出组合" : "买入组合";
+  const parts = [];
+  const matchedAll = Array.isArray(group.matched_all) ? group.matched_all : [];
+  const matchedAny = Array.isArray(group.matched_any) ? group.matched_any : [];
+  const missingAll = Array.isArray(group.missing_all) ? group.missing_all : [];
+
+  if (Array.isArray(group.all) && group.all.length > 0) {
+    if (group.triggered || group.all_ok) {
+      parts.push(`全部满足 [${summarizeDecisionEntries(matchedAll.length ? matchedAll : group.all)}]`);
+    } else if (missingAll.length > 0) {
+      parts.push(`待补条件 [${summarizeDecisionEntries(missingAll)}]`);
+    }
+  }
+
+  if (Array.isArray(group.any) && group.any.length > 0) {
+    if (matchedAny.length > 0) {
+      parts.push(`任一命中 [${summarizeDecisionEntries(matchedAny)}]`);
+    } else {
+      parts.push(`候选任一 [${summarizeDecisionEntries(group.any)}]`);
+    }
+  }
+
+  if (parts.length === 0) {
+    return "";
+  }
+  return `${title}：${parts.join("；")}`;
+}
+
+function webhookSignalLabel(signal) {
+  const normalized = String(signal || "").trim().toUpperCase();
+  const mapping = {
+    BUY: "\u4e70\u5165",
+    SELL: "\u5356\u51fa",
+    HOLD: "\u89c2\u671b",
+    TEST: "\u6d4b\u8bd5",
+  };
+  return mapping[normalized] || normalized || "\u901a\u77e5";
+}
+
+function uniqueWebhookEntries(entries = []) {
+  const seen = new Set();
+  const result = [];
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    if (!entry || typeof entry !== "object") return;
+    const ref = String(entry.ref || `${entry.component_id || ""}.${entry.check_id || ""}`)
+      .trim()
+      .toLowerCase();
+    if (!ref || seen.has(ref)) return;
+    seen.add(ref);
+    result.push(entry);
+  });
+  return result;
+}
+
+function buildFallbackWebhookEntries(strategySignal, signal) {
+  const normalizedSignal = String(signal || "").trim().toUpperCase();
+  const side = normalizedSignal === "SELL" ? "sell" : normalizedSignal === "BUY" ? "buy" : "";
+  if (!side) {
+    return [];
+  }
+
+  const components = strategySignal?.details?.components;
+  if (!components || typeof components !== "object") {
+    return [];
+  }
+
+  const entries = [];
+  Object.values(components).forEach((component) => {
+    if (!component || typeof component !== "object") return;
+    const checks = component.checks;
+    const check = checks && typeof checks === "object" ? checks[side] : null;
+    if (!check?.ok) return;
+    entries.push({
+      ref: `${component.id || "main"}.${side}`,
+      component_id: String(component.id || "main").trim().toLowerCase(),
+      component_label: String(component.label || component.id || "").trim(),
+      timeframe: String(component.timeframe || "--").trim(),
+      check_id: side,
+      matched: true,
+      matched_rules: Array.isArray(check.matched) ? check.matched : [],
+      rules: Array.isArray(check.rules) ? check.rules : [],
+      warnings: Array.isArray(check.warnings) ? check.warnings : [],
+    });
+  });
+  return entries;
+}
+
+function collectWebhookDecisionEntries(strategySignal, signal) {
+  const resolved = resolveStrategyDecisionState(strategySignal);
+  const decisionText = buildStrategyDecisionText(strategySignal);
+  if (!resolved) {
+    const fallbackEntries = uniqueWebhookEntries(buildFallbackWebhookEntries(strategySignal, signal));
+    return {
+      side: String(signal || "").trim().toUpperCase() === "SELL" ? "sell" : "buy",
+      primaryEntries: fallbackEntries,
+      supportingEntries: [],
+      allEntries: fallbackEntries,
+      decisionText,
+    };
+  }
+
+  const { side, group } = resolved;
+  const matchedAll = Array.isArray(group.matched_all) ? group.matched_all : [];
+  const matchedAny = Array.isArray(group.matched_any) ? group.matched_any : [];
+  const primaryEntries = uniqueWebhookEntries(matchedAny.length ? matchedAny : matchedAll);
+  const supportingEntries = uniqueWebhookEntries(matchedAny.length ? matchedAll : []);
+  return {
+    side,
+    primaryEntries,
+    supportingEntries,
+    allEntries: uniqueWebhookEntries([...primaryEntries, ...supportingEntries]),
+    decisionText,
+  };
+}
+
+function webhookRulePriority(entry, signal) {
+  const normalizedSignal = String(signal || "").trim().toUpperCase();
+  const checkId = String(entry?.check_id || "").trim().toLowerCase();
+  const buyWeights = {
+    bottom_div: 120,
+    double_gold: 110,
+    buy: 90,
+    pass: 70,
+    volume_ok: 60,
+  };
+  const sellWeights = {
+    top_div: 130,
+    break_60: 120,
+    break_20: 110,
+    double_dead: 100,
+    break_5: 90,
+    sell: 80,
+  };
+  const sharedWeights = {
+    volume_ok: 60,
+    pass: 50,
+  };
+  if (normalizedSignal === "SELL") {
+    return sellWeights[checkId] ?? sharedWeights[checkId] ?? 10;
+  }
+  return buyWeights[checkId] ?? sharedWeights[checkId] ?? 10;
+}
+
+function buildWebhookRuleSummary(entry, strategySignal = null) {
+  const checkId = String(entry?.check_id || "").trim().toLowerCase();
+  const componentLabel = String(entry?.component_label || entry?.component_id || "").trim();
+  const strategyId = normalizeStrategyValue(strategySignal?.strategy?.id || strategySignal?.strategy_id);
+  const checkLabel = strategyCheckLabel(checkId);
+  if (checkId === "buy" && strategyId.includes("divergence")) {
+    return componentLabel ? `${componentLabel}\u51fa\u73b0\u5e95\u80cc\u79bb` : "\u5e95\u80cc\u79bb";
+  }
+  if (checkId === "sell" && strategyId.includes("divergence")) {
+    return componentLabel ? `${componentLabel}\u51fa\u73b0\u9876\u80cc\u79bb` : "\u9876\u80cc\u79bb";
+  }
+  if (["bottom_div", "top_div", "double_gold", "double_dead"].includes(checkId)) {
+    return componentLabel ? `${componentLabel}\u51fa\u73b0${checkLabel}` : checkLabel;
+  }
+  return formatDecisionEntryLabel(entry);
+}
+
+function describeWebhookRuleMeta(entry, signal, strategySignal) {
+  const normalizedSignal = String(signal || "").trim().toUpperCase();
+  const checkId = String(entry?.check_id || "").trim().toLowerCase();
+  const strategyId = normalizeStrategyValue(strategySignal?.strategy?.id || strategySignal?.strategy_id);
+
+  if (checkId === "bottom_div" || (checkId === "buy" && strategyId.includes("divergence"))) {
+    return {
+      familyId: "bottom_divergence",
+      familyLabel: "\u80cc\u79bb\u4fe1\u53f7",
+      titleLabel: "\u5e95\u80cc\u79bb",
+      ruleLabel: "\u5e95\u80cc\u79bb",
+      actionHint: "\u5206\u6279\u89c2\u5bdf\uff0c\u7b49\u5f85\u53cd\u5f39\u786e\u8ba4\uff0c\u4e0d\u8ffd\u9ad8\u3002",
+    };
+  }
+  if (checkId === "top_div" || (checkId === "sell" && strategyId.includes("divergence"))) {
+    return {
+      familyId: "top_divergence",
+      familyLabel: "\u80cc\u79bb\u4fe1\u53f7",
+      titleLabel: "\u9876\u80cc\u79bb",
+      ruleLabel: "\u9876\u80cc\u79bb",
+      actionHint: "\u4f18\u5148\u4fdd\u62a4\u5229\u6da6\uff0c\u89c2\u5bdf\u662f\u5426\u7ee7\u7eed\u8f6c\u5f31\u3002",
+    };
+  }
+  if (checkId === "double_gold") {
+    return {
+      familyId: "double_gold",
+      familyLabel: "\u53cc\u91d1\u53cc\u6b7b",
+      titleLabel: "\u53cc\u91d1\u5171\u632f",
+      ruleLabel: strategyCheckLabel(checkId),
+      actionHint: "\u4f18\u5148\u5173\u6ce8\u540e\u7eed\u91cf\u80fd\u548c\u56de\u8e29\u786e\u8ba4\uff0c\u907f\u514d\u8ffd\u6da8\u3002",
+    };
+  }
+  if (checkId === "double_dead") {
+    return {
+      familyId: "double_dead",
+      familyLabel: "\u53cc\u91d1\u53cc\u6b7b",
+      titleLabel: "\u53cc\u6b7b\u8f6c\u5f31",
+      ruleLabel: strategyCheckLabel(checkId),
+      actionHint: "\u4f18\u5148\u6536\u7f29\u4ed3\u4f4d\uff0c\u7b49\u5f85\u91cd\u65b0\u4f01\u7a33\u3002",
+    };
+  }
+  if (checkId.startsWith("break_")) {
+    const hintMap = {
+      break_5: "\u77ed\u7ebf\u8f6c\u5f31\uff0c\u5148\u51cf\u4ed3\u89c2\u5bdf\u3002",
+      break_20: "\u6ce2\u6bb5\u8f6c\u5f31\uff0c\u4f18\u5148\u51cf\u4ed3\u3002",
+      break_60: "\u4e2d\u671f\u8d70\u5f31\uff0c\u5f3a\u98ce\u9669\u79bb\u573a\u3002",
+    };
+    return {
+      familyId: "ma_break",
+      familyLabel: "\u5747\u7ebf\u7834\u4f4d",
+      titleLabel: strategyCheckLabel(checkId),
+      ruleLabel: strategyCheckLabel(checkId),
+      actionHint: hintMap[checkId] || "\u5747\u7ebf\u7834\u4f4d\uff0c\u6ce8\u610f\u98ce\u9669\u63a7\u5236\u3002",
+    };
+  }
+  if (checkId === "volume_ok") {
+    return {
+      familyId: "volume_confirm",
+      familyLabel: "\u91cf\u4ef7\u786e\u8ba4",
+      titleLabel: "\u91cf\u80fd\u786e\u8ba4",
+      ruleLabel: strategyCheckLabel(checkId),
+      actionHint: "\u91cf\u4ef7\u914d\u5408\u6709\u6548\uff0c\u4ecd\u9700\u7b49\u5f85\u4e70\u70b9\u5171\u632f\u3002",
+    };
+  }
+  if (checkId === "pass") {
+    return {
+      familyId: "trend_filter",
+      familyLabel: "\u8d8b\u52bf\u8fc7\u6ee4",
+      titleLabel: normalizedSignal === "SELL" ? "\u8d8b\u52bf\u8f6c\u5f31" : "\u591a\u5468\u671f\u5171\u632f",
+      ruleLabel: strategyCheckLabel(checkId),
+      actionHint:
+        normalizedSignal === "SELL"
+          ? "\u5927\u5468\u671f\u4ecd\u9700\u7ee7\u7eed\u8ddf\u8e2a\uff0c\u82e5\u540c\u65f6\u51fa\u73b0\u8f6c\u5f31\u4fe1\u53f7\u9700\u4f18\u5148\u9632\u5b88\u3002"
+          : "\u8d8b\u52bf\u6761\u4ef6\u5df2\u5bf9\u9f50\uff0c\u53ef\u7ee7\u7eed\u7b49\u5f85\u66f4\u4f18\u4e70\u70b9\u3002",
+    };
+  }
+  if (checkId === "buy") {
+    return {
+      familyId: "buy_signal",
+      familyLabel: "\u7b56\u7565\u4e70\u70b9",
+      titleLabel: "\u7b56\u7565\u4e70\u70b9",
+      ruleLabel: strategyCheckLabel(checkId),
+      actionHint: "\u53ef\u7ed3\u5408\u4ed3\u4f4d\u8ba1\u5212\u5206\u6279\u6267\u884c\u3002",
+    };
+  }
+  if (checkId === "sell") {
+    return {
+      familyId: "sell_signal",
+      familyLabel: "\u7b56\u7565\u5356\u70b9",
+      titleLabel: "\u7b56\u7565\u5356\u70b9",
+      ruleLabel: strategyCheckLabel(checkId),
+      actionHint: "\u7ed3\u5408\u6301\u4ed3\u548c\u98ce\u9669\u504f\u597d\uff0c\u4f18\u5148\u6267\u884c\u98ce\u63a7\u3002",
+    };
+  }
+  return {
+    familyId: normalizedSignal === "SELL" ? "sell_signal" : "buy_signal",
+    familyLabel: "\u7b56\u7565\u4fe1\u53f7",
+    titleLabel: normalizedSignal === "SELL" ? "\u7b56\u7565\u5356\u70b9" : "\u7b56\u7565\u4e70\u70b9",
+    ruleLabel: strategyCheckLabel(checkId),
+    actionHint: "\u8be5\u4fe1\u53f7\u5df2\u89e6\u53d1\uff0c\u8bf7\u7ed3\u5408\u4ed3\u4f4d\u4e0e\u98ce\u9669\u8ba1\u5212\u6267\u884c\u3002",
+  };
+}
+
+function buildWebhookReasonContext(row, signal) {
+  const strategySignal = row?.strategySignal || {};
+  const normalizedSignal = String(signal || "").trim().toUpperCase();
+  const decisionState = collectWebhookDecisionEntries(strategySignal, normalizedSignal);
+  const primaryEntries = [...decisionState.primaryEntries].sort(
+    (left, right) => webhookRulePriority(right, normalizedSignal) - webhookRulePriority(left, normalizedSignal)
+  );
+  const primaryEntry = primaryEntries[0] || decisionState.allEntries[0] || null;
+  const secondaryEntries = uniqueWebhookEntries([
+    ...primaryEntries.slice(1),
+    ...decisionState.supportingEntries,
+  ]).filter((entry) => String(entry.ref || "").trim() !== String(primaryEntry?.ref || "").trim());
+  const meta = describeWebhookRuleMeta(primaryEntry, normalizedSignal, strategySignal);
+  const reasonSummary = primaryEntry
+    ? buildWebhookRuleSummary(primaryEntry, strategySignal)
+    : strategySignal?.reason || `${webhookSignalLabel(normalizedSignal)}\u4fe1\u53f7\u5df2\u89e6\u53d1`;
+  const reasonDetails = uniqueWebhookEntries(decisionState.allEntries)
+    .map((entry) => buildWebhookRuleSummary(entry, strategySignal))
+    .filter(Boolean);
+  const supportingReasons = secondaryEntries
+    .map((entry) => buildWebhookRuleSummary(entry, strategySignal))
+    .filter((text, index, list) => text && list.indexOf(text) === index)
+    .slice(0, 4);
+  return {
+    category: "signal",
+    signal_type: normalizedSignal.toLowerCase(),
+    rule_family: meta.familyId,
+    rule_family_label: meta.familyLabel,
+    rule_name: primaryEntry?.ref || meta.familyId,
+    rule_label: meta.ruleLabel,
+    rule_names: uniqueWebhookEntries(decisionState.allEntries)
+      .map((entry) => String(entry.ref || "").trim())
+      .filter(Boolean),
+    reason_summary: reasonSummary,
+    reason_details: reasonDetails,
+    supporting_reasons: supportingReasons,
+    decision_text: decisionState.decisionText || "",
+    message_title: `${webhookSignalLabel(normalizedSignal)} | ${meta.titleLabel}`,
+    action_hint: meta.actionHint,
+  };
+}
+
+function buildWebhookMessageText(payload) {
+  const title = String(payload?.message_title || "").trim() || `${webhookSignalLabel(payload?.signal)} | \u7b56\u7565\u901a\u77e5`;
+  const symbol = String(payload?.symbol || "").trim().toUpperCase();
+  const name = String(payload?.name || "").trim();
+  const strategy = String(payload?.strategy_label || payload?.strategy || "").trim();
+  const source = String(payload?.source_label || payload?.source || "").trim();
+  const timestamp = String(payload?.timestamp || "").trim().replace("T", " ").replace("Z", "");
+  const reasonSummary = String(payload?.reason_summary || payload?.reason || "").trim();
+  const decisionText = String(payload?.decision_text || "").trim();
+  const actionHint = String(payload?.action_hint || "").trim();
+  const reasonDetails = Array.isArray(payload?.reason_details) ? payload.reason_details.filter(Boolean) : [];
+  const supportingReasons = Array.isArray(payload?.supporting_reasons)
+    ? payload.supporting_reasons.filter(Boolean)
+    : [];
+  const lines = [`Signal Deck ${title}`];
+
+  if (symbol || name) {
+    lines.push(`\u6807\u7684\uff1a${[symbol, name].filter(Boolean).join(" ")}`);
+  }
+  if (strategy) {
+    lines.push(`\u7b56\u7565\uff1a${strategy}`);
+  }
+  if (reasonSummary) {
+    lines.push(`\u4e3b\u56e0\uff1a${reasonSummary}`);
+  }
+  if (supportingReasons.length > 0) {
+    lines.push(`\u8f85\u52a9\uff1a${supportingReasons.slice(0, 3).join("\uff1b")}`);
+  } else if (reasonDetails.length > 1) {
+    lines.push(`\u8f85\u52a9\uff1a${reasonDetails.slice(1, 4).join("\uff1b")}`);
+  }
+  if (decisionText) {
+    lines.push(`\u5224\u5b9a\uff1a${decisionText}`);
+  }
+
+  const hasPrice = payload?.price !== null && payload?.price !== undefined && !Number.isNaN(Number(payload.price));
+  const hasChange = payload?.change !== null && payload?.change !== undefined && !Number.isNaN(Number(payload.change));
+  const hasChangePct =
+    payload?.change_pct !== null && payload?.change_pct !== undefined && !Number.isNaN(Number(payload.change_pct));
+  if (hasPrice || hasChange || hasChangePct) {
+    const parts = [];
+    if (hasPrice) {
+      parts.push(`\u4ef7\u683c\uff1a${formatFixed(payload.price, 3)}`);
+    }
+    if (hasChange || hasChangePct) {
+      const changeParts = [];
+      if (hasChange) {
+        changeParts.push(formatSigned(payload.change, 3));
+      }
+      if (hasChangePct) {
+        changeParts.push(formatPercent(payload.change_pct, 2));
+      }
+      parts.push(`\u6da8\u8dcc\uff1a${changeParts.join(" / ")}`);
+    }
+    lines.push(parts.join(" | "));
+  }
+
+  if (source) {
+    lines.push(`\u6570\u636e\u6e90\uff1a${source}`);
+  }
+  if (timestamp) {
+    lines.push(`\u65f6\u95f4\uff1a${timestamp}`);
+  }
+  if (actionHint) {
+    lines.push(`\u5efa\u8bae\uff1a${actionHint}`);
+  }
+  return lines.join("\n");
+}
+
+function buildStrategyToastMeta(payload) {
+  const parts = [];
+  const actualSource = String(payload?.source?.actual_label || payload?.source?.actual || "").trim();
+  if (actualSource) {
+    parts.push(actualSource);
+  }
+
+  if (payload?.priority?.label && payload.priority.label !== "--") {
+    const score = Number(payload.priority.score);
+    const scoreText = Number.isFinite(score) ? ` (${formatFixed(score, 2)})` : "";
+    parts.push(`优先级 ${payload.priority.label}${scoreText}`);
+  }
+
+  if (payload?.timestamp) {
+    parts.push(formatTimestampLabel(payload.timestamp, strategyDisplayTimeframe(payload) || "5m", false));
+  }
+
+  if (payload?.reason) {
+    parts.push(`命中项 ${payload.reason}`);
+  }
+
+  return parts.join(" | ");
+}
+
+function ensureSignalDrawerStrategyLabel() {
+  if (dom.signalDrawerStrategyLabel) {
+    return dom.signalDrawerStrategyLabel;
+  }
+  const container = dom.signalDrawer?.querySelector(".drawer-header > div");
+  if (!container) {
+    return null;
+  }
+  const node = document.createElement("p");
+  node.id = "signalDrawerStrategyLabel";
+  node.className = "signal-drawer-current-rule";
+  node.textContent = "当前规则：--";
+  container.appendChild(node);
+  dom.signalDrawerStrategyLabel = node;
+  return node;
+}
+
+function renderStrategyBlueprint(container, components = []) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!Array.isArray(components) || components.length === 0) {
+    container.innerHTML = `<div class="empty-state">当前策略没有组件化说明。</div>`;
+    return;
+  }
+
+  components.forEach((component) => {
+    const card = document.createElement("article");
+    card.className = "strategy-component-card";
+
+    const header = document.createElement("div");
+    header.className = "strategy-component-top";
+    header.innerHTML = `
+      <div>
+        <strong>${component.label || component.id || "组件"}</strong>
+        <span class="strategy-component-id">${component.id || "--"}</span>
+      </div>
+      <span class="strategy-component-timeframe">${component.timeframe || "--"}</span>
+    `;
+    card.appendChild(header);
+
+    const list = document.createElement("div");
+    list.className = "strategy-check-list";
+    (component.checks || []).forEach((check) => {
+      const node = document.createElement("div");
+      node.className = `strategy-check-chip ${isStrategyRiskCheck(check.id) ? "pass" : "risk"}`;
+      node.innerHTML = `
+        <span class="strategy-check-title">${check.label || check.id || "检查"}</span>
+        <span class="strategy-check-body">${summarizeStrategyRules(check.rules)}</span>
+      `;
+      list.appendChild(node);
+    });
+    if (!list.childNodes.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = "当前组件没有显式检查项。";
+      list.appendChild(empty);
+    }
+    card.appendChild(list);
+    container.appendChild(card);
+  });
+}
+
+function strategyCheckStateTone(checkId, checkState) {
+  if (!checkState) return "pending";
+  if (Array.isArray(checkState.warnings) && checkState.warnings.length > 0) return "warn";
+  if (checkState.ok) {
+    return isStrategyRiskCheck(checkId) ? "risk" : "pass";
+  }
+  return "pending";
+}
+
+function strategyCheckStateText(checkId, checkState) {
+  if (!checkState) return "等待刷新";
+  if (checkState.ok) {
+    return isStrategyRiskCheck(checkId) ? "风险命中" : "条件通过";
+  }
+  if (Array.isArray(checkState.warnings) && checkState.warnings.length > 0) {
+    return "规则告警";
+  }
+  return "未命中";
+}
+
+function formatComponentIndicatorSummary(indicators = {}) {
+  const parts = [];
+  ["dif", "dea", "k", "d", "j", "ma5", "ma20", "ma60", "vol_ma5"].forEach((key) => {
+    const value = Number(indicators?.[key]);
+    if (!Number.isFinite(value)) return;
+    const digits = ["k", "d", "j"].includes(key) ? 2 : 2;
+    parts.push(`${key.toUpperCase()} ${formatFixed(value, digits)}`);
+  });
+  return parts.join(" | ");
+}
+
+function renderStrategyComponentStatuses(container, components = [], details = {}) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!Array.isArray(components) || components.length === 0) {
+    container.innerHTML = `<div class="empty-state">当前策略没有组件状态。</div>`;
+    return;
+  }
+
+  const componentStates = details?.components || {};
+  components.forEach((component) => {
+    const stateItem = componentStates?.[component.id];
+    const card = document.createElement("article");
+    card.className = "strategy-component-card live";
+
+    const header = document.createElement("div");
+    header.className = "strategy-component-top";
+    header.innerHTML = `
+      <div>
+        <strong>${component.label || component.id || "组件"}</strong>
+        <span class="strategy-component-id">${stateItem?.name || component.id || "--"}</span>
+      </div>
+      <span class="strategy-component-timeframe">${component.timeframe || stateItem?.timeframe || "--"}</span>
+    `;
+    card.appendChild(header);
+
+    const meta = document.createElement("div");
+    meta.className = "strategy-component-meta";
+    meta.textContent = stateItem?.timestamp
+      ? `${formatTimestampLabel(stateItem.timestamp, component.timeframe || stateItem.timeframe || "1d", false)}`
+      : "打开策略后会显示组件实时状态";
+    card.appendChild(meta);
+
+    const list = document.createElement("div");
+    list.className = "strategy-check-list";
+    (component.checks || []).forEach((check) => {
+      const checkState = stateItem?.checks?.[check.id];
+      const node = document.createElement("div");
+      node.className = `strategy-check-chip ${strategyCheckStateTone(check.id, checkState)}`;
+      const matchedCount = Array.isArray(checkState?.matched) ? checkState.matched.length : 0;
+      const ruleCount = Array.isArray(checkState?.rules) ? checkState.rules.length : Array.isArray(check.rules) ? check.rules.length : 0;
+      node.innerHTML = `
+        <span class="strategy-check-title">${check.label || check.id || "检查"}</span>
+        <span class="strategy-check-state">${strategyCheckStateText(check.id, checkState)}${ruleCount ? ` · ${matchedCount}/${ruleCount}` : ""}</span>
+        <span class="strategy-check-body">${summarizeStrategyRules(checkState?.rules || check.rules)}</span>
+      `;
+      list.appendChild(node);
+    });
+    card.appendChild(list);
+
+    const summary = formatComponentIndicatorSummary(stateItem?.indicator_payload || {});
+    if (summary) {
+      const footer = document.createElement("div");
+      footer.className = "strategy-component-meta";
+      footer.textContent = summary;
+      card.appendChild(footer);
+    }
+    container.appendChild(card);
+  });
+}
+
 function renderReasons(container, items, emptyText) {
   container.innerHTML = "";
   if (!items || items.length === 0) {
@@ -1250,14 +2637,18 @@ function buildWatchlistSignalItem(row) {
   const price = quote ? formatFixed(quote.last_price, 3) : "--";
   const change = quote ? formatPercent(quote.change_pct) : "--";
   const signal = String(strategySignal?.signal || "--").toUpperCase();
-  const priority = strategySignal?.priority?.label && strategySignal.priority.label !== "--"
-    ? ` | ${strategySignal.priority.label}`
+  const priorityLabel = String(strategySignal?.priority?.label || strategySignal?.priority_label || "").trim();
+  const priority = priorityLabel && priorityLabel !== "--"
+    ? ` | ${priorityLabel}`
     : "";
   const jValue = Number(strategySignal?.indicators?.j);
   const jText = Number.isFinite(jValue) ? ` | J ${formatFixed(jValue, 2)}` : "";
+  const decisionText = buildStrategyDecisionText(strategySignal);
+  const reasonText = decisionText || (strategySignal?.reason ? `依据：${strategySignal.reason}` : "");
+  const header = `${labelSymbol} ${name} | ${price} | ${change} | ${signal}${priority}${jText}`;
   return {
     symbol,
-    text: `${labelSymbol} ${name} | ${price} | ${change} | ${signal}${priority}${jText}`,
+    text: reasonText ? `${header}\n${reasonText}` : header,
   };
 }
 
@@ -1348,6 +2739,118 @@ function formatWebhookLogTime(value) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function setWebhookRuntimeCardTone(node, tone = "") {
+  if (!node) return;
+  node.classList.remove("is-good", "is-warn", "is-danger");
+  if (tone) {
+    node.classList.add(tone);
+  }
+}
+
+function renderWebhookRuntimeStatus() {
+  const syncNode = dom.webhookRuntimeSyncValue;
+  const workerNode = dom.webhookRuntimeWorkerValue;
+  const lastScanNode = dom.webhookRuntimeLastScanValue;
+  const lastSentNode = dom.webhookRuntimeLastSentValue;
+  const hintNode = dom.webhookRuntimeHint;
+  if (!syncNode || !workerNode || !lastScanNode || !lastSentNode || !hintNode) {
+    return;
+  }
+
+  const syncCard = syncNode.closest(".webhook-runtime-card");
+  const workerCard = workerNode.closest(".webhook-runtime-card");
+  const scanCard = lastScanNode.closest(".webhook-runtime-card");
+  const sentCard = lastSentNode.closest(".webhook-runtime-card");
+  const worker = state.alertWorkerState && typeof state.alertWorkerState === "object" ? state.alertWorkerState : {};
+  const synced = isAlertRuntimeSynced();
+  const hasSnapshot = Boolean(state.alertRuntimeSnapshot);
+  const syncPending = Boolean(state.alertRuntimeSyncTimer);
+  const lastScanText = formatWebhookLogTime(worker.last_run_at || worker.last_success_at);
+  const lastSentText = formatWebhookLogTime(worker.last_sent_at);
+  const sentCount = Number(worker.last_sent_count || 0);
+
+  syncNode.textContent = synced ? "已同步" : "未同步";
+  if (!hasSnapshot) {
+    syncNode.textContent = "等待同步";
+  } else if (syncPending && !synced) {
+    syncNode.textContent = "同步中";
+  }
+  setWebhookRuntimeCardTone(syncCard, synced ? "is-good" : syncPending ? "is-warn" : "is-danger");
+
+  if (worker.running) {
+    workerNode.textContent = "运行中";
+  } else if (worker.started_at || worker.last_run_at || worker.last_success_at) {
+    workerNode.textContent = "未运行";
+  } else {
+    workerNode.textContent = "未知";
+  }
+  setWebhookRuntimeCardTone(workerCard, worker.running ? "is-good" : worker.last_error ? "is-danger" : "is-warn");
+
+  lastScanNode.textContent = lastScanText;
+  setWebhookRuntimeCardTone(scanCard, lastScanText === "--" ? "is-warn" : "is-good");
+/*
+
+  lastSentNode.textContent = lastSentText === "--" ? "尚未发送" : `${lastSentText}${sentCount > 0 ? ` · 最近 ${sentCount} 条` : ""}`;
+  setWebhookRuntimeCardTone(sentCard, lastSentText === "--" ? "is-warn" : "is-good");
+
+  hintNode.classList.toggle("error", Boolean(state.alertRuntimeSyncError || worker.last_error));
+  if (state.alertRuntimeSyncError) {
+    hintNode.textContent = `同步异常：${state.alertRuntimeSyncError}`;
+    return;
+  }
+  if (worker.last_error) {
+    hintNode.textContent = `Worker 异常：${worker.last_error}`;
+    return;
+  }
+  if (!hasSnapshot) {
+    hintNode.textContent = "尚未拿到后台运行时状态，打开弹窗后会自动尝试同步。";
+    return;
+  }
+  if (!synced) {
+    hintNode.textContent = syncPending
+      ? "本地配置正在推送到后台，请稍候刷新状态。"
+      : "本地配置和后台运行时还不一致，后台预警可能还在使用上一版设置。";
+    return;
+  }
+
+  const updatedAtText = formatWebhookLogTime(state.alertRuntimeUpdatedAt);
+  hintNode.textContent =
+    updatedAtText === "--"
+      ? "后台运行时已和当前页面保持一致。"
+      : `后台运行时最近同步时间：${updatedAtText}`;
+}
+
+*/
+  lastSentNode.textContent = lastSentText === "--" ? "尚未发送" : `${lastSentText}${sentCount > 0 ? ` | 最近 ${sentCount} 条` : ""}`;
+  setWebhookRuntimeCardTone(sentCard, lastSentText === "--" ? "is-warn" : "is-good");
+
+  hintNode.classList.toggle("error", Boolean(state.alertRuntimeSyncError || worker.last_error));
+  if (state.alertRuntimeSyncError) {
+    hintNode.textContent = `同步异常：${state.alertRuntimeSyncError}`;
+    return;
+  }
+  if (worker.last_error) {
+    hintNode.textContent = `Worker 异常：${worker.last_error}`;
+    return;
+  }
+  if (!hasSnapshot) {
+    hintNode.textContent = "尚未拿到后台运行时状态，打开弹窗后会自动尝试同步。";
+    return;
+  }
+  if (!synced) {
+    hintNode.textContent = syncPending
+      ? "本地配置正在推送到后台，请稍候刷新状态。"
+      : "本地配置和后台运行时还不一致，后台预警可能还在使用上一版设置。";
+    return;
+  }
+
+  const updatedAtText = formatWebhookLogTime(state.alertRuntimeUpdatedAt);
+  hintNode.textContent =
+    updatedAtText === "--"
+      ? "后台运行时已和当前页面保持一致。"
+      : `后台运行时最近同步时间：${updatedAtText}`;
+}
+
 function renderWebhookLogList() {
   if (!dom.webhookLogList) return;
   const logs = Array.isArray(state.webhookLogs) ? state.webhookLogs : [];
@@ -1404,6 +2907,7 @@ function renderWebhookPanel(options = {}) {
       ? `${String(latest.signal || "TEST").toUpperCase()} · ${latest.ok ? "成功" : "失败"}`
       : "--";
   }
+  renderWebhookRuntimeStatus();
   renderWebhookLogList();
   if (dom.webhookStatusMessage && !dom.webhookStatusMessage.textContent.trim()) {
     setWebhookStatusMessage("");
@@ -1424,14 +2928,28 @@ async function testWebhookConnection() {
   const payload = {
     event: "webhook_test",
     signal: "TEST",
+    category: "test",
+    signal_type: "test",
+    rule_family: "test",
+    rule_family_label: "测试消息",
+    rule_name: "webhook.connectivity",
+    rule_label: "WebHook 连通性",
+    reason_summary: "手动测试 WebHook 连通性",
+    reason_details: ["仅用于验证 WebHook 是否能够正常接收消息。"],
+    supporting_reasons: [],
+    decision_text: "",
+    message_title: "测试 | WebHook 连通性",
+    action_hint: "若收到本消息，说明当前 WebHook 已经可以正常接收通知。",
     symbol: state.symbol || "",
     name: state.currentPayload?.name || "手动测试",
     strategy: state.strategy,
     strategy_label: getStrategyMeta(state.strategy)?.label || state.strategy,
     reason: "手动测试 WebHook 连通性",
     timestamp: new Date().toISOString(),
-    source: state.source,
+    source: state.currentPayload?.source?.actual || state.source,
+    source_label: state.currentPayload?.source?.actual_label || getSourceMeta(state.source)?.label || state.source,
   };
+  payload.message_text = buildWebhookMessageText(payload);
   const result = await sendWebhookAlert(payload, {
     urlOverride: targetUrl,
     recordType: "test",
@@ -1458,6 +2976,15 @@ function openWebhookModal() {
   dom.webhookBackdrop.classList.remove("hidden");
   dom.webhookModal.classList.remove("hidden");
   dom.webhookModal.setAttribute("aria-hidden", "false");
+  loadAlertRuntimeState()
+    .then(() => {
+      if (state.webhookModalOpen) {
+        renderWebhookPanel({ syncInput: true });
+      }
+    })
+    .catch((error) => {
+      console.error(error);
+    });
 }
 
 function closeWebhookModal() {
@@ -1471,7 +2998,7 @@ function buildWebhookPayload(row, signal) {
   const symbol = String(row.item?.symbol || row.strategySignal?.symbol || "").trim().toLowerCase();
   const quote = row.quote;
   const strategySignal = row.strategySignal;
-  return {
+  const payload = {
     event: "signal_state_change",
     signal,
     symbol,
@@ -1484,8 +3011,85 @@ function buildWebhookPayload(row, signal) {
     reason: strategySignal?.reason || "",
     priority: strategySignal?.priority || null,
     timestamp: strategySignal?.timestamp || new Date().toISOString(),
-    source: state.source,
+    source: strategySignal?.source?.actual || state.source,
+    source_label: strategySignal?.source?.actual_label || getSourceMeta(state.source)?.label || state.source,
+    ...buildWebhookReasonContext(row, signal),
   };
+  payload.message_text = buildWebhookMessageText(payload);
+  return payload;
+}
+
+function renderWebhookRuntimeStatus() {
+  const syncNode = dom.webhookRuntimeSyncValue;
+  const workerNode = dom.webhookRuntimeWorkerValue;
+  const lastScanNode = dom.webhookRuntimeLastScanValue;
+  const lastSentNode = dom.webhookRuntimeLastSentValue;
+  const hintNode = dom.webhookRuntimeHint;
+  if (!syncNode || !workerNode || !lastScanNode || !lastSentNode || !hintNode) {
+    return;
+  }
+
+  const syncCard = syncNode.closest(".webhook-runtime-card");
+  const workerCard = workerNode.closest(".webhook-runtime-card");
+  const scanCard = lastScanNode.closest(".webhook-runtime-card");
+  const sentCard = lastSentNode.closest(".webhook-runtime-card");
+  const worker = state.alertWorkerState && typeof state.alertWorkerState === "object" ? state.alertWorkerState : {};
+  const synced = isAlertRuntimeSynced();
+  const hasSnapshot = Boolean(state.alertRuntimeSnapshot);
+  const syncPending = Boolean(state.alertRuntimeSyncTimer);
+  const lastScanText = formatWebhookLogTime(worker.last_run_at || worker.last_success_at);
+  const lastSentText = formatWebhookLogTime(worker.last_sent_at);
+  const sentCount = Number(worker.last_sent_count || 0);
+
+  syncNode.textContent = synced ? "\u5df2\u540c\u6b65" : "\u672a\u540c\u6b65";
+  if (!hasSnapshot) {
+    syncNode.textContent = "\u7b49\u5f85\u540c\u6b65";
+  } else if (syncPending && !synced) {
+    syncNode.textContent = "\u540c\u6b65\u4e2d";
+  }
+  setWebhookRuntimeCardTone(syncCard, synced ? "is-good" : syncPending ? "is-warn" : "is-danger");
+
+  if (worker.running) {
+    workerNode.textContent = "\u8fd0\u884c\u4e2d";
+  } else if (worker.started_at || worker.last_run_at || worker.last_success_at) {
+    workerNode.textContent = "\u672a\u8fd0\u884c";
+  } else {
+    workerNode.textContent = "\u672a\u77e5";
+  }
+  setWebhookRuntimeCardTone(workerCard, worker.running ? "is-good" : worker.last_error ? "is-danger" : "is-warn");
+
+  lastScanNode.textContent = lastScanText;
+  setWebhookRuntimeCardTone(scanCard, lastScanText === "--" ? "is-warn" : "is-good");
+
+  lastSentNode.textContent =
+    lastSentText === "--" ? "\u5c1a\u672a\u53d1\u9001" : `${lastSentText}${sentCount > 0 ? ` | \u6700\u8fd1 ${sentCount} \u6761` : ""}`;
+  setWebhookRuntimeCardTone(sentCard, lastSentText === "--" ? "is-warn" : "is-good");
+
+  hintNode.classList.toggle("error", Boolean(state.alertRuntimeSyncError || worker.last_error));
+  if (state.alertRuntimeSyncError) {
+    hintNode.textContent = `\u540c\u6b65\u5f02\u5e38\uff1a${state.alertRuntimeSyncError}`;
+    return;
+  }
+  if (worker.last_error) {
+    hintNode.textContent = `Worker \u5f02\u5e38\uff1a${worker.last_error}`;
+    return;
+  }
+  if (!hasSnapshot) {
+    hintNode.textContent = "\u5c1a\u672a\u62ff\u5230\u540e\u53f0\u8fd0\u884c\u65f6\u72b6\u6001\uff0c\u6253\u5f00\u5f39\u7a97\u540e\u4f1a\u81ea\u52a8\u5c1d\u8bd5\u540c\u6b65\u3002";
+    return;
+  }
+  if (!synced) {
+    hintNode.textContent = syncPending
+      ? "\u672c\u5730\u914d\u7f6e\u6b63\u5728\u63a8\u9001\u5230\u540e\u53f0\uff0c\u8bf7\u7a0d\u5019\u5237\u65b0\u72b6\u6001\u3002"
+      : "\u672c\u5730\u914d\u7f6e\u548c\u540e\u53f0\u8fd0\u884c\u65f6\u8fd8\u4e0d\u4e00\u81f4\uff0c\u540e\u53f0\u9884\u8b66\u53ef\u80fd\u8fd8\u5728\u4f7f\u7528\u4e0a\u4e00\u7248\u8bbe\u7f6e\u3002";
+    return;
+  }
+
+  const updatedAtText = formatWebhookLogTime(state.alertRuntimeUpdatedAt);
+  hintNode.textContent =
+    updatedAtText === "--"
+      ? "\u540e\u53f0\u8fd0\u884c\u65f6\u5df2\u548c\u5f53\u524d\u9875\u9762\u4fdd\u6301\u4e00\u81f4\u3002"
+      : `\u540e\u53f0\u8fd0\u884c\u65f6\u6700\u8fd1\u540c\u6b65\u65f6\u95f4\uff1a${updatedAtText}`;
 }
 
 async function sendWebhookAlert(payload, options = {}) {
@@ -1564,70 +3168,19 @@ function seedWebhookAlertState(symbol) {
 }
 
 function processWebhookAlerts() {
-  const rows = currentGroupItems().map((item) => ({
-    item,
-    quote: getWatchlistQuote(item),
-    strategySignal: getWatchlistStrategySignal(item),
-  }));
-  let changed = false;
-  rows.forEach((row) => {
-    const symbol = String(row.item?.symbol || "").trim().toLowerCase();
-    if (!symbol) return;
-    const nextSignal = watchlistAlertStateForRow(row);
-    const dayKey = webhookDayKeyForRow(row);
-    const previousEntry = state.webhookAlertStates[symbol] || {};
-    const previousSignal = previousEntry.signal;
-    const lastAlertDayKey = String(previousEntry.lastAlertDayKey || "");
-    const isAlertSignal = ["BUY", "SELL"].includes(nextSignal);
-    if (!previousSignal) {
-      state.webhookAlertStates[symbol] = {
-        signal: nextSignal,
-        dayKey,
-        lastAlertDayKey: isAlertSignal ? dayKey : "",
-        updatedAt: Date.now(),
-      };
-      changed = true;
-      return;
-    }
-    if (previousSignal === nextSignal) {
-      const isNewDay = String(previousEntry.dayKey || "") !== dayKey;
-      if (isNewDay) {
-        state.webhookAlertStates[symbol] = {
-          ...previousEntry,
-          signal: nextSignal,
-          dayKey,
-          updatedAt: Date.now(),
-        };
-        changed = true;
-        if (isAlertSignal && lastAlertDayKey !== dayKey && state.webhookAlertSymbols.has(symbol) && state.webhookUrl) {
-          state.webhookAlertStates[symbol].lastAlertDayKey = dayKey;
-          sendWebhookAlert(buildWebhookPayload(row, nextSignal));
-        }
-      }
-      return;
-    }
-
-    state.webhookAlertStates[symbol] = {
-      ...previousEntry,
-      signal: nextSignal,
-      dayKey,
-      lastAlertDayKey: isAlertSignal ? dayKey : String(previousEntry.lastAlertDayKey || ""),
-      updatedAt: Date.now(),
-    };
-    changed = true;
-    if (state.webhookAlertSymbols.has(symbol) && isAlertSignal && state.webhookUrl) {
-      sendWebhookAlert(buildWebhookPayload(row, nextSignal));
-    }
-  });
-  if (changed) {
-    saveWebhookAlertStates();
-  }
+  return;
 }
 
 function renderSignalDrawerFromWatchlist() {
   const items = currentGroupItems();
   const total = items.length;
   const strategyOff = normalizeStrategyValue(state.strategy) === "none";
+  const strategyMeta = getStrategyMeta(state.strategy);
+  const strategyLabelNode = ensureSignalDrawerStrategyLabel();
+
+  if (strategyLabelNode) {
+    strategyLabelNode.textContent = `当前规则：${strategyMeta?.label || state.strategy || "--"}`;
+  }
 
   if (strategyOff) {
     dom.buyCount.textContent = `0 / ${total}`;
@@ -1878,7 +3431,7 @@ function renderWatchlist() {
           <span class="watchlist-cycle ${tradeCycleClass(tradeCycle)}">${tradeCycle || "--"}</span>
           ${
             strategySignal?.triggered && ["BUY", "SELL"].includes(strategySignal.signal)
-              ? `<span class="watchlist-signal ${watchlistStrategySignalClass(strategySignal.signal)}">5m ${strategySignal.signal}</span>`
+              ? `<span class="watchlist-signal ${watchlistStrategySignalClass(strategySignal.signal)}">${watchlistStrategySignalLabel(strategySignal)}</span>`
               : ""
           }
           ${streak?.label ? `<span class="watchlist-streak ${watchlistStreakClass(streak)}">${streak.label}</span>` : ""}
@@ -1986,7 +3539,7 @@ function renderWatchlist() {
           <span class="watchlist-cycle ${tradeCycleClass(tradeCycle)}">${tradeCycle || "--"}</span>
           ${
             strategySignal?.triggered && ["BUY", "SELL"].includes(strategySignal.signal)
-              ? `<span class="watchlist-signal ${watchlistStrategySignalClass(strategySignal.signal)}">5m ${strategySignal.signal}</span>`
+              ? `<span class="watchlist-signal ${watchlistStrategySignalClass(strategySignal.signal)}">${watchlistStrategySignalLabel(strategySignal)}</span>`
               : ""
           }
           ${streak?.label ? `<span class="watchlist-streak ${watchlistStreakClass(streak)}">${streak.label}</span>` : ""}
@@ -2398,7 +3951,7 @@ function renderStrategyOptions() {
   strategies.forEach((item) => {
     const option = document.createElement("option");
     option.value = normalizeStrategyValue(item.id);
-    option.textContent = item.label || item.id;
+    option.textContent = item.is_overridden ? `${item.label || item.id} *` : (item.label || item.id);
     dom.strategySelect.appendChild(option);
   });
 
@@ -2409,7 +3962,6 @@ function renderStrategyOptions() {
   }
 
   dom.strategySelect.value = state.strategy;
-  updateStrategyDeleteButtonState();
 }
 
 function renderStrategyError(message) {
@@ -2422,9 +3974,14 @@ function buildStrategyMetaText(payload) {
   const strategyLabel = payload?.strategy?.label || getStrategyMeta(state.strategy)?.label || "Strategy";
   const parts = [strategyLabel];
   const strategyTimeframe = String(payload?.strategy?.timeframe || "").trim();
+  const displayTimeframe = strategyDisplayTimeframe(payload);
 
   if (strategyTimeframe) {
-    parts.push(`Fixed ${strategyTimeframe}`);
+    const prefix =
+      strategyTimeframe.includes("路") || strategyTimeframe.includes("/") || strategyTimeframe.includes("·")
+        ? "Frames"
+        : "Fixed";
+    parts.push(`${prefix} ${strategyTimeframe}`);
   }
 
   if (payload?.reason) {
@@ -2443,7 +4000,7 @@ function buildStrategyMetaText(payload) {
   }
 
   if (payload?.timestamp) {
-    parts.push(formatTimestampLabel(payload.timestamp, "5m", false));
+    parts.push(formatTimestampLabel(payload.timestamp, displayTimeframe || "5m", false));
   }
 
   return parts.join(" | ");
@@ -2455,13 +4012,19 @@ function renderStrategySignal(payload = null) {
     dom.strategySignalBadge.textContent = "OFF";
     dom.strategySignalBadge.className = "strategy-pill off";
     dom.strategySignalMeta.textContent = strategyMeta?.description || "Strategy alerts are off";
+    if (state.rulesModalOpen && state.rulesPayload) {
+      renderStrategyComponentStatuses(dom.strategyComponentStatusList, state.rulesPayload.components || [], null);
+    }
     return;
   }
 
   if (!payload) {
     dom.strategySignalBadge.textContent = "SCAN";
     dom.strategySignalBadge.className = "strategy-pill neutral";
-    dom.strategySignalMeta.textContent = strategyMeta?.description || "Waiting for 5m strategy refresh";
+    dom.strategySignalMeta.textContent = strategyMeta?.description || "Waiting for strategy refresh";
+    if (state.rulesModalOpen && state.rulesPayload) {
+      renderStrategyComponentStatuses(dom.strategyComponentStatusList, state.rulesPayload.components || [], null);
+    }
     return;
   }
 
@@ -2469,6 +4032,13 @@ function renderStrategySignal(payload = null) {
   dom.strategySignalBadge.textContent = signal;
   dom.strategySignalBadge.className = `strategy-pill ${strategyPillClass(signal)}`;
   dom.strategySignalMeta.textContent = buildStrategyMetaText(payload);
+  if (state.rulesModalOpen && state.rulesPayload) {
+    renderStrategyComponentStatuses(
+      dom.strategyComponentStatusList,
+      state.rulesPayload.components || [],
+      payload.details || {}
+    );
+  }
 }
 
 function showToast({ tone = "neutral", title, body = "", meta = "" }) {
@@ -2519,6 +4089,31 @@ function maybeShowStrategyToast(payload, options = {}) {
   }
 
   state.lastStrategyAlertKey = payload.alert_key;
+  const signal = String(payload?.signal || "").trim().toUpperCase();
+  const tone = signal === "BUY" ? "buy" : signal === "SELL" ? "sell" : "neutral";
+  const symbol = String(payload?.symbol || "").trim().toUpperCase();
+  const name = String(payload?.name || "").trim();
+  const titleParts = [symbol];
+  if (name) {
+    titleParts.push(name);
+  }
+  if (signal) {
+    titleParts.push(signal);
+  }
+  const strategyLabel = payload?.strategy?.label || getStrategyMeta(state.strategy)?.label || "策略";
+  const decisionText = buildStrategyDecisionText(payload);
+  const bodyParts = [`策略：${strategyLabel}`];
+  if (decisionText) {
+    bodyParts.push(`判定：${decisionText}`);
+  } else if (payload?.reason) {
+    bodyParts.push(`判定：${payload.reason}`);
+  }
+  showToast({
+    tone,
+    title: titleParts.join(" | "),
+    body: bodyParts.join("\n"),
+    meta: buildStrategyToastMeta(payload),
+  });
 }
 
 async function loadStrategies() {
@@ -2653,6 +4248,14 @@ function renderRulesModal(payload) {
   dom.rulesAdjust.textContent = payload.adjust || "--";
   dom.rulesCurrentSource.textContent = state.currentPayload?.source.actual_label || getSourceMeta(state.source)?.label || "--";
   renderStrategySignal(state.strategySignal);
+  renderStrategyConfigEditor(payload);
+  renderStrategyConfigHelp(payload);
+  renderStrategyBlueprint(dom.strategyComponentsList, payload.components || []);
+  renderStrategyComponentStatuses(
+    dom.strategyComponentStatusList,
+    payload.components || [],
+    state.strategySignal?.details || {}
+  );
   renderChipList(
     dom.indicatorList,
     (payload.indicators || []).map((item) => `${item.name}: ${item.description}`),
@@ -2664,9 +4267,6 @@ function renderRulesModal(payload) {
   if (dom.rulesModalTitle && strategyMeta?.label) {
     dom.rulesModalTitle.textContent = `规则说明 · ${strategyMeta.label}`;
   }
-  if (dom.customRuleMessage && !dom.customRuleMessage.classList.contains("error")) {
-    dom.customRuleMessage.textContent = "支持周期 1m/5m/15m/30m/60m/1d；条件支持 >、<、>=、<=、==、!=。";
-  }
 }
 
 async function refreshRulesModal(options = {}) {
@@ -2676,6 +4276,132 @@ async function refreshRulesModal(options = {}) {
   } catch (error) {
     console.error(error);
     setRefreshStatus(error.message || "规则说明加载失败");
+  }
+}
+
+function parseStrategyConfigDraft() {
+  const raw = dom.strategyConfigInput?.value.trim() || "";
+  if (!raw) {
+    throw new Error("策略配置不能为空");
+  }
+  const config = JSON.parse(raw);
+  if (!config || Array.isArray(config) || typeof config !== "object") {
+    throw new Error("策略配置必须是 JSON 对象");
+  }
+  return config;
+}
+
+function formatStrategyConfigEditor() {
+  try {
+    const config = parseStrategyConfigDraft();
+    dom.strategyConfigInput.value = JSON.stringify(config, null, 2);
+    state.strategyConfigDirty = dom.strategyConfigInput.value !== state.strategyConfigSeed;
+    setStrategyConfigMessage("已格式化当前策略配置。", "success");
+  } catch (error) {
+    console.error(error);
+    setStrategyConfigMessage(error.message || "策略配置格式化失败", "error");
+  }
+}
+
+async function saveStrategyConfigOverride() {
+  if (!isStrategyEditable()) {
+    setStrategyConfigMessage("当前策略不支持编辑。", "error");
+    return;
+  }
+
+  let config;
+  try {
+    config = parseStrategyConfigDraft();
+  } catch (error) {
+    console.error(error);
+    setStrategyConfigMessage(error.message || "策略配置解析失败", "error");
+    return;
+  }
+
+  setStrategyConfigControlsDisabled(true);
+  setStrategyConfigMessage("正在保存策略配置...");
+  try {
+    const response = await fetch(`/api/strategy-config/${encodeURIComponent(state.strategy)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "策略配置保存失败");
+    }
+
+    if (Array.isArray(payload.strategies)) {
+      state.availableStrategies = payload.strategies;
+    }
+    state.rulesPayload = payload.rules || null;
+    state.strategySignal = null;
+    state.watchlistStrategySignals = {};
+    state.lastStrategyAlertKey = "";
+    renderStrategyOptions();
+    renderWatchlist();
+    renderStrategySignal(null);
+    if (state.rulesPayload) {
+      renderRulesModal(state.rulesPayload);
+    }
+    setStrategyConfigMessage("策略配置已保存到本机覆盖。", "success");
+    setRefreshStatus("策略配置已保存");
+    runDashboardPulse({ silent: true, forceWatchlistSignals: true, announce: false });
+  } catch (error) {
+    console.error(error);
+    setStrategyConfigMessage(error.message || "策略配置保存失败", "error");
+    setRefreshStatus(error.message || "策略配置保存失败");
+  } finally {
+    if (!state.rulesPayload) {
+      setStrategyConfigControlsDisabled(false);
+    }
+  }
+}
+
+async function resetStrategyConfigOverride() {
+  if (!isStrategyEditable()) {
+    setStrategyConfigMessage("当前策略不支持编辑。", "error");
+    return;
+  }
+  if (!window.confirm("恢复默认后，会移除这套策略的本机覆盖配置。确定继续吗？")) {
+    return;
+  }
+
+  setStrategyConfigControlsDisabled(true);
+  setStrategyConfigMessage("正在恢复内置配置...");
+  try {
+    const response = await fetch(`/api/strategy-config/${encodeURIComponent(state.strategy)}`, {
+      method: "DELETE",
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "恢复默认失败");
+    }
+
+    if (Array.isArray(payload.strategies)) {
+      state.availableStrategies = payload.strategies;
+    }
+    state.rulesPayload = payload.rules || null;
+    state.strategySignal = null;
+    state.watchlistStrategySignals = {};
+    state.lastStrategyAlertKey = "";
+    renderStrategyOptions();
+    renderWatchlist();
+    renderStrategySignal(null);
+    if (state.rulesPayload) {
+      renderRulesModal(state.rulesPayload);
+    }
+    setStrategyConfigMessage("已恢复为内置基础配置。", "success");
+    setRefreshStatus("策略配置已恢复默认");
+    runDashboardPulse({ silent: true, forceWatchlistSignals: true, announce: false });
+  } catch (error) {
+    console.error(error);
+    setStrategyConfigMessage(error.message || "恢复默认失败", "error");
+    setRefreshStatus(error.message || "恢复默认失败");
+  } finally {
+    if (!state.rulesPayload) {
+      setStrategyConfigControlsDisabled(false);
+    }
   }
 }
 
@@ -3032,6 +4758,12 @@ async function runDashboardPulse(options = {}) {
 
     applyDashboardPulsePayload(payload, { includeChart, includeWatchlistSignals, announce, now });
 
+    const chartError = includeChart ? String(payload?.errors?.chart || "").trim() : "";
+    if (chartError && !payload.chart && !silent) {
+      setRefreshStatus(chartError);
+      return;
+    }
+
     if (!silent) {
       setRefreshStatus(`自动刷新中 · ${new Date().toLocaleTimeString("zh-CN")}`);
     }
@@ -3244,7 +4976,12 @@ async function loadMarket(symbol, options = {}) {
       now: Date.now(),
     });
     state.isLoadingChart = false;
-    setRefreshStatus(`自动刷新中 · ${new Date().toLocaleTimeString("zh-CN")}`);
+    const chartError = String(payload?.errors?.chart || "").trim();
+    if (chartError && !payload.chart) {
+      setRefreshStatus(chartError);
+    } else {
+      setRefreshStatus(`自动刷新中 · ${new Date().toLocaleTimeString("zh-CN")}`);
+    }
   } catch (error) {
     console.error(error);
     if (requestId !== state.marketRequestId) {
@@ -3446,6 +5183,7 @@ function bindEvents() {
     saveStrategyPreference();
     renderWatchlist();
     renderStrategySignal(null);
+    renderSignalDrawerFromWatchlist();
     if (state.rulesModalOpen) {
       refreshRulesModal({ force: true });
     }
@@ -3480,14 +5218,31 @@ function bindEvents() {
     closeRulesModal();
   });
 
-  if (dom.customRuleSaveButton) {
-    dom.customRuleSaveButton.addEventListener("click", submitCustomStrategyRule);
+  if (dom.strategyConfigFormatButton) {
+    dom.strategyConfigFormatButton.addEventListener("click", formatStrategyConfigEditor);
   }
-  if (dom.customRuleInput) {
-    dom.customRuleInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
+  if (dom.strategyConfigHelpButton) {
+    dom.strategyConfigHelpButton.addEventListener("click", () => {
+      setStrategyConfigHelpOpen(!state.strategyConfigHelpOpen);
+    });
+  }
+  if (dom.strategyConfigSaveButton) {
+    dom.strategyConfigSaveButton.addEventListener("click", saveStrategyConfigOverride);
+  }
+  if (dom.strategyConfigResetButton) {
+    dom.strategyConfigResetButton.addEventListener("click", resetStrategyConfigOverride);
+  }
+  if (dom.strategyConfigInput) {
+    dom.strategyConfigInput.addEventListener("input", () => {
+      state.strategyConfigDirty = dom.strategyConfigInput.value !== state.strategyConfigSeed;
+      if (state.strategyConfigDirty && !dom.strategyConfigMessage.classList.contains("error")) {
+        setStrategyConfigMessage("检测到未保存修改。");
+      }
+    });
+    dom.strategyConfigInput.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        submitCustomStrategyRule();
+        saveStrategyConfigOverride();
       }
     });
   }
@@ -3527,6 +5282,122 @@ function renderSummary(payload) {
   updateWatchlistButtonState();
 }
 
+function buildChartDivergenceMarkers(payload, riseColor, fallColor) {
+  const items = Array.isArray(payload?.annotations?.divergences) ? payload.annotations.divergences : [];
+  const bottomLabel = "\u5e95\u80cc\u79bb";
+  const topLabel = "\u9876\u80cc\u79bb";
+  return items
+    .filter((item) => item?.time && Number.isFinite(Number(item?.price)))
+    .map((item) => {
+      const isBottom = String(item.type || "").trim().toLowerCase() === "bottom";
+      const markerColor = isBottom ? riseColor : fallColor;
+      return {
+        name: item.label || (isBottom ? "底背离" : "顶背离"),
+        coord: [item.time, Number(item.price)],
+        value: item.short_label || item.label || (isBottom ? "底背离" : "顶背离"),
+        symbol: "triangle",
+        symbolSize: 18,
+        symbolRotate: isBottom ? 0 : 180,
+        symbolOffset: [0, isBottom ? 12 : -12],
+        itemStyle: {
+          color: markerColor,
+          borderColor: "rgba(244, 247, 250, 0.88)",
+          borderWidth: 1,
+          shadowBlur: 10,
+          shadowColor: `${markerColor}66`,
+        },
+        label: {
+          show: true,
+          formatter: item.short_label || item.label || (isBottom ? "底背离" : "顶背离"),
+          color: markerColor,
+          fontSize: 10,
+          fontWeight: 700,
+          position: isBottom ? "bottom" : "top",
+          distance: 4,
+        },
+        tooltipMeta: item,
+      };
+    });
+}
+
+function buildChartDivergenceTooltipMap(payload) {
+  const items = Array.isArray(payload?.annotations?.divergences) ? payload.annotations.divergences : [];
+  const result = new Map();
+  items.forEach((item) => {
+    const time = String(item?.time || "").trim();
+    if (!time) return;
+    const lines = result.get(time) || [];
+    const indicatorText = Number.isFinite(Number(item?.indicator))
+      ? `DIF ${formatFixed(item.indicator, 2)}`
+      : "DIF --";
+    const referenceText = item?.reference_time
+      ? ` | 对比 ${formatTimestampLabel(item.reference_time, payload.timeframe, false)}`
+      : "";
+    lines.push(`${item.label || "背离"} | ${indicatorText}${referenceText}`);
+    result.set(time, lines);
+  });
+  return result;
+}
+
+function buildChartDivergenceMarkersSafe(payload, riseColor, fallColor) {
+  const items = Array.isArray(payload?.annotations?.divergences) ? payload.annotations.divergences : [];
+  const bottomLabel = "\u5e95\u80cc\u79bb";
+  const topLabel = "\u9876\u80cc\u79bb";
+  return items
+    .filter((item) => item?.time && Number.isFinite(Number(item?.price)))
+    .map((item) => {
+      const isBottom = String(item?.type || "").trim().toLowerCase() === "bottom";
+      const markerColor = isBottom ? riseColor : fallColor;
+      const label = item?.short_label || item?.label || (isBottom ? bottomLabel : topLabel);
+      return {
+        name: item?.label || (isBottom ? bottomLabel : topLabel),
+        coord: [item.time, Number(item.price)],
+        value: label,
+        symbol: "triangle",
+        symbolSize: 18,
+        symbolRotate: isBottom ? 0 : 180,
+        symbolOffset: [0, isBottom ? 12 : -12],
+        itemStyle: {
+          color: markerColor,
+          borderColor: "rgba(244, 247, 250, 0.88)",
+          borderWidth: 1,
+          shadowBlur: 10,
+          shadowColor: `${markerColor}66`,
+        },
+        label: {
+          show: true,
+          formatter: label,
+          color: markerColor,
+          fontSize: 10,
+          fontWeight: 700,
+          position: isBottom ? "bottom" : "top",
+          distance: 4,
+        },
+        tooltipMeta: item,
+      };
+    });
+}
+
+function buildChartDivergenceTooltipMapSafe(payload) {
+  const items = Array.isArray(payload?.annotations?.divergences) ? payload.annotations.divergences : [];
+  const result = new Map();
+  items.forEach((item) => {
+    const time = String(item?.time || "").trim();
+    if (!time) return;
+    const lines = result.get(time) || [];
+    const label = item?.label || "\u80cc\u79bb";
+    const indicatorText = Number.isFinite(Number(item?.indicator))
+      ? `DIF ${formatFixed(item.indicator, 2)}`
+      : "DIF --";
+    const referenceText = item?.reference_time
+      ? ` | \u5bf9\u6bd4 ${formatTimestampLabel(item.reference_time, payload.timeframe, false)}`
+      : "";
+    lines.push(`${label} | ${indicatorText}${referenceText}`);
+    result.set(time, lines);
+  });
+  return result;
+}
+
 function renderChart(payload) {
   if (!state.chart) {
     state.chart = echarts.init(document.getElementById("chart"));
@@ -3545,6 +5416,8 @@ function renderChart(payload) {
   const axisColor = "rgba(223, 231, 242, 0.74)";
   const splitColor = "rgba(148, 163, 184, 0.14)";
   const gridBorderColor = "rgba(148, 163, 184, 0.12)";
+  const divergenceMarkers = buildChartDivergenceMarkersSafe(payload, riseColor, fallColor);
+  const divergenceTooltipMap = buildChartDivergenceTooltipMapSafe(payload);
 
   state.chart.setOption(
     {
@@ -3575,6 +5448,11 @@ function renderChart(payload) {
 
             const rawValue = Array.isArray(item.value) ? item.value[item.value.length - 1] : item.value;
             lines.push(`${item.marker}${item.seriesName} ${formatTooltipValue(item.seriesName, rawValue)}`);
+          });
+
+          const divergenceLines = divergenceTooltipMap.get(String(rows[0].axisValue || "").trim()) || [];
+          divergenceLines.forEach((line) => {
+            lines.push(`• ${line}`);
           });
 
           return lines.join("<br/>");
@@ -3709,6 +5587,27 @@ function renderChart(payload) {
             borderColor: riseColor,
             borderColor0: fallColor,
           },
+          markPoint: divergenceMarkers.length
+            ? {
+                data: divergenceMarkers,
+                tooltip: {
+                  formatter: (params) => {
+                    const meta = params?.data?.tooltipMeta || {};
+                    const parts = [meta.label || params.name || "背离"];
+                    if (meta.time) {
+                      parts.push(formatTimestampLabel(meta.time, payload.timeframe, false));
+                    }
+                    if (Number.isFinite(Number(meta.close))) {
+                      parts.push(`收盘 ${formatFixed(meta.close, 3)}`);
+                    }
+                    if (Number.isFinite(Number(meta.indicator))) {
+                      parts.push(`DIF ${formatFixed(meta.indicator, 2)}`);
+                    }
+                    return parts.join("<br/>");
+                  },
+                },
+              }
+            : undefined,
         },
         {
           name: `${payload.timeframe} MA5`,
@@ -4018,14 +5917,25 @@ function bindEvents() {
     closeRulesModal();
   });
 
-  if (dom.customRuleSaveButton) {
-    dom.customRuleSaveButton.addEventListener("click", submitCustomStrategyRule);
+  if (dom.strategyConfigFormatButton) {
+    dom.strategyConfigFormatButton.addEventListener("click", formatStrategyConfigEditor);
   }
-  if (dom.customRuleInput) {
-    dom.customRuleInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
+  if (dom.strategyConfigHelpButton) {
+    dom.strategyConfigHelpButton.addEventListener("click", () => {
+      setStrategyConfigHelpOpen(!state.strategyConfigHelpOpen);
+    });
+  }
+  if (dom.strategyConfigSaveButton) {
+    dom.strategyConfigSaveButton.addEventListener("click", saveStrategyConfigOverride);
+  }
+  if (dom.strategyConfigResetButton) {
+    dom.strategyConfigResetButton.addEventListener("click", resetStrategyConfigOverride);
+  }
+  if (dom.strategyConfigInput) {
+    dom.strategyConfigInput.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        submitCustomStrategyRule();
+        saveStrategyConfigOverride();
       }
     });
   }
@@ -4262,8 +6172,319 @@ function bindEvents() {
   }
 }
 
+function bindEvents() {
+  dom.searchButton.addEventListener("click", () => {
+    resolveAndLoadInput();
+  });
+
+  dom.searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      if (!isSuggestionsOpen()) {
+        fetchSuggestions(dom.searchInput.value).catch((error) => {
+          console.error(error);
+          hideSuggestions();
+        });
+      } else {
+        setActiveSuggestionIndex(state.activeSuggestionIndex + 1);
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      if (isSuggestionsOpen()) {
+        setActiveSuggestionIndex(state.activeSuggestionIndex - 1);
+        event.preventDefault();
+      }
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      resolveAndLoadInput();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      hideSuggestions();
+    }
+  });
+
+  dom.searchInput.addEventListener("input", () => {
+    clearTimeout(state.searchTimer);
+    state.searchTimer = window.setTimeout(() => {
+      fetchSuggestions(dom.searchInput.value).catch((error) => {
+        console.error(error);
+        hideSuggestions();
+      });
+    }, 220);
+  });
+
+  dom.searchInput.addEventListener("focus", () => {
+    if (dom.searchInput.value.trim() && state.searchResults.length > 0) {
+      renderSuggestions(state.searchResults);
+    }
+  });
+
+  if (dom.webhookInput) {
+    dom.webhookInput.addEventListener("input", () => {
+      dom.webhookInput.classList.toggle("unsaved", dom.webhookInput.value.trim() !== state.webhookUrl);
+    });
+    dom.webhookInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commitWebhookUrlPreference();
+      }
+    });
+  }
+  if (dom.webhookSaveButton) {
+    dom.webhookSaveButton.addEventListener("click", commitWebhookUrlPreference);
+  }
+  if (dom.webhookTestButton) {
+    dom.webhookTestButton.addEventListener("click", testWebhookConnection);
+  }
+
+  if (dom.watchlistSearchInput) {
+    dom.watchlistSearchInput.addEventListener("input", () => {
+      state.watchlistFilter = dom.watchlistSearchInput.value.trim();
+      renderWatchlist();
+    });
+  }
+  if (dom.watchlist) {
+    dom.watchlist.addEventListener("scroll", scheduleWatchlistScrollRefresh, { passive: true });
+  }
+
+  document.addEventListener("click", (event) => {
+    if (!dom.searchSuggestions.contains(event.target) && event.target !== dom.searchInput) {
+      hideSuggestions();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (state.webhookModalOpen) {
+      closeWebhookModal();
+      return;
+    }
+    if (state.rulesModalOpen) {
+      closeRulesModal();
+      return;
+    }
+    if (state.signalDrawerOpen) {
+      setSignalDrawerOpen(false);
+    }
+  });
+
+  dom.watchlistButton.addEventListener("click", () => {
+    toggleCurrentIntoWatchlist();
+  });
+
+  dom.watchlistImportButton.addEventListener("click", () => {
+    if (!dom.watchlistImportInput) {
+      return;
+    }
+    if (typeof dom.watchlistImportInput.showPicker === "function") {
+      dom.watchlistImportInput.showPicker();
+      return;
+    }
+    dom.watchlistImportInput.click();
+  });
+
+  dom.watchlistImportInput.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    try {
+      await handleWatchlistImport(file);
+    } catch (error) {
+      console.error(error);
+      const message = error?.message || "XLSX import failed";
+      setRefreshStatus(message);
+      showToast({
+        tone: "sell",
+        title: "Watchlist import failed",
+        body: message,
+      });
+    } finally {
+      event.target.value = "";
+    }
+  });
+
+  dom.watchlistSortSelect.addEventListener("change", () => {
+    state.watchlistSortMode = normalizeWatchlistSortMode(dom.watchlistSortSelect.value);
+    saveWatchlistSortPreference();
+    renderWatchlist();
+  });
+
+  dom.sourceSelect.addEventListener("change", () => {
+    state.source = dom.sourceSelect.value;
+    saveSourcePreference();
+    renderSourcePanels();
+    loadMarket(state.symbol);
+  });
+
+  dom.strategySelect.addEventListener("change", () => {
+    state.strategy = normalizeStrategyValue(dom.strategySelect.value);
+    state.strategySignal = null;
+    state.watchlistStrategySignals = {};
+    state.lastStrategyAlertKey = "";
+    state.rulesPayload = null;
+    saveStrategyPreference();
+    renderWatchlist();
+    renderStrategySignal(null);
+    renderSignalDrawerFromWatchlist();
+    if (state.rulesModalOpen) {
+      refreshRulesModal({ force: true });
+    }
+    startAutoRefresh();
+  });
+
+  dom.timeframeButtons.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.timeframe = button.dataset.timeframe;
+      setActiveTimeframeButton();
+      loadMarket(state.symbol);
+    });
+  });
+
+  dom.rulesButton.addEventListener("click", () => {
+    openRulesModal();
+  });
+
+  if (dom.webhookButton) {
+    dom.webhookButton.addEventListener("click", () => {
+      openWebhookModal();
+    });
+  }
+
+  dom.signalDrawerToggle.addEventListener("click", () => {
+    setSignalDrawerOpen(!state.signalDrawerOpen);
+  });
+
+  dom.signalDrawerClose.addEventListener("click", () => {
+    setSignalDrawerOpen(false);
+  });
+
+  dom.signalDrawerBackdrop.addEventListener("click", () => {
+    setSignalDrawerOpen(false);
+  });
+
+  dom.rulesModalClose.addEventListener("click", () => {
+    closeRulesModal();
+  });
+
+  dom.rulesBackdrop.addEventListener("click", () => {
+    closeRulesModal();
+  });
+
+  if (dom.webhookModalClose) {
+    dom.webhookModalClose.addEventListener("click", () => {
+      closeWebhookModal();
+    });
+  }
+  if (dom.webhookBackdrop) {
+    dom.webhookBackdrop.addEventListener("click", () => {
+      closeWebhookModal();
+    });
+  }
+
+  if (dom.strategyConfigFormatButton) {
+    dom.strategyConfigFormatButton.addEventListener("click", formatStrategyConfigEditor);
+  }
+  if (dom.strategyConfigHelpButton) {
+    dom.strategyConfigHelpButton.addEventListener("click", () => {
+      setStrategyConfigHelpOpen(!state.strategyConfigHelpOpen);
+    });
+  }
+  if (dom.strategyConfigSaveButton) {
+    dom.strategyConfigSaveButton.addEventListener("click", saveStrategyConfigOverride);
+  }
+  if (dom.strategyConfigResetButton) {
+    dom.strategyConfigResetButton.addEventListener("click", resetStrategyConfigOverride);
+  }
+  if (dom.strategyConfigInput) {
+    dom.strategyConfigInput.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveStrategyConfigOverride();
+      }
+    });
+  }
+}
+
+async function sendWebhookAlert(payload, options = {}) {
+  const { urlOverride = "", recordType = "signal", quietStatus = false } = options;
+  const targetUrl = String(urlOverride || state.webhookUrl || "").trim();
+  if (!targetUrl) {
+    return { ok: false, error: "Please provide a WebHook URL first.", skipped: true };
+  }
+
+  try {
+    const response = await fetch("/api/webhook-alert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: targetUrl,
+        payload,
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (result?.runtime && typeof result.runtime === "object") {
+      applyAlertRuntimePayload(result.runtime);
+    }
+    if (!response.ok) {
+      if (!result?.runtime) {
+        appendWebhookLogEntry({
+          ok: false,
+          type: recordType,
+          signal: payload.signal || "TEST",
+          symbol: payload.symbol || "",
+          name: payload.name || payload.reason || "",
+          strategyLabel: payload.strategy_label || payload.strategy || "",
+          responseStatus: result.status || null,
+          message: (result.error || "Webhook send failed").toString().slice(0, 80),
+          reason: payload.reason || "",
+        });
+      }
+      throw new Error(result.error || "Webhook send failed");
+    }
+
+    if (!result?.runtime) {
+      appendWebhookLogEntry({
+        ok: true,
+        type: recordType,
+        signal: payload.signal || "TEST",
+        symbol: payload.symbol || "",
+        name: payload.name || payload.reason || "",
+        strategyLabel: payload.strategy_label || payload.strategy || "",
+        responseStatus: result.status || response.status,
+        message: (result.body || "Sent").toString().slice(0, 80),
+        reason: payload.reason || "",
+      });
+    }
+
+    if (!quietStatus) {
+      setRefreshStatus(`WebHook sent | ${String(payload.symbol || "test").toUpperCase()} ${payload.signal}`);
+    }
+    if (state.webhookModalOpen) {
+      renderWebhookPanel({ syncInput: true });
+    }
+    return {
+      ok: true,
+      status: result.status || response.status,
+      body: result.body || "",
+      runtime: result.runtime || null,
+    };
+  } catch (error) {
+    console.error(error);
+    if (!quietStatus) {
+      setRefreshStatus(error.message || "Webhook send failed");
+    }
+    return { ok: false, error: error.message || "Webhook send failed" };
+  }
+}
+
 async function init() {
   bindEvents();
+  await loadAlertRuntimeState();
   renderWatchlist();
   renderWebhookPanel({ syncInput: true });
   setActiveTimeframeButton();

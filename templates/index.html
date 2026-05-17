@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260411m') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260517c') }}">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   </head>
   <body>
@@ -59,7 +59,6 @@
                 <div class="compact-field strategy-field">
                   <span class="inline-label">Strategy</span>
                   <div class="strategy-control-row">
-                    <button id="strategyDeleteButton" class="strategy-delete-button" type="button" disabled>删</button>
                     <select id="strategySelect" class="accent-select"></select>
                   </div>
                 </div>
@@ -200,6 +199,7 @@
           <div>
             <p class="eyebrow">Signal Drawer</p>
             <h2>规则命中</h2>
+            <p id="signalDrawerStrategyLabel" class="signal-drawer-current-rule">当前规则：--</p>
           </div>
           <button id="signalDrawerClose" class="drawer-close" type="button" aria-label="关闭规则抽屉">×</button>
         </div>
@@ -228,7 +228,9 @@
           <button id="rulesModalClose" class="modal-close" type="button" aria-label="关闭规则说明">×</button>
         </div>
 
-        <div class="modal-meta">
+        <div class="rules-workspace">
+          <aside class="rules-overview">
+            <div class="modal-meta rules-meta-grid">
           <div class="meta-pill">
             <span>默认周期</span>
             <strong id="rulesTimeframe">--</strong>
@@ -249,35 +251,60 @@
           <span id="strategySignalMeta" class="strategy-meta">Strategy alerts are off</span>
         </section>
 
-        <section class="custom-rule-panel">
-          <div class="custom-rule-copy">
-            <h3>自定义规则</h3>
-            <p>格式：名称 | 周期 | BUY: 条件 | SELL: 条件。例：5m MACD/KDJ | Fixed 5m | BUY: DIF&gt;DEA AND K&gt;D | SELL: DIF&lt;DEA AND K&lt;D</p>
+        <section class="strategy-config-panel">
+          <div class="strategy-config-copy">
+            <h3>策略配置</h3>
+            <p id="strategyConfigMeta">当前显示的是策略完整 JSON。你可以在这里调整阈值、周期、组件和买卖条件，并保存为本机覆盖配置。</p>
           </div>
-          <div class="custom-rule-form">
-            <input id="customRuleInput" class="custom-rule-input" type="text" autocomplete="off" placeholder="名称 | 5m | BUY: DIF&gt;DEA AND K&gt;D | SELL: DIF&lt;DEA AND K&lt;D">
-            <button id="customRuleSaveButton" class="custom-rule-save" type="button">录入</button>
+          <div class="strategy-config-actions">
+            <button
+              id="strategyConfigHelpButton"
+              class="strategy-config-action strategy-config-help-toggle"
+              type="button"
+              aria-expanded="false"
+              aria-controls="strategyConfigHelpPanel"
+            >
+              参数说明
+            </button>
+            <button id="strategyConfigFormatButton" class="strategy-config-action" type="button">格式化</button>
+            <button id="strategyConfigResetButton" class="strategy-config-action" type="button">恢复默认</button>
+            <button id="strategyConfigSaveButton" class="strategy-config-save" type="button">保存配置</button>
           </div>
-          <p id="customRuleMessage" class="custom-rule-message"></p>
+          <section id="strategyConfigHelpPanel" class="strategy-config-help hidden" aria-hidden="true">
+            <div id="strategyConfigHelpContent" class="strategy-config-help-content"></div>
+          </section>
+          <textarea id="strategyConfigInput" class="strategy-config-input" spellcheck="false" placeholder="策略 JSON 会显示在这里"></textarea>
+          <p id="strategyConfigMessage" class="strategy-config-message"></p>
         </section>
 
-        <div class="modal-body">
-          <section class="modal-section">
+          </aside>
+
+          <div class="rules-detail-grid">
+          <section class="modal-section modal-section-wide section-blueprint">
+            <h3>组件框架</h3>
+            <div id="strategyComponentsList" class="modal-list"></div>
+          </section>
+          <section class="modal-section modal-section-wide section-live">
+            <h3>实时组件状态</h3>
+            <div id="strategyComponentStatusList" class="modal-list"></div>
+          </section>
+          <section class="modal-section section-indicators">
             <h3>指标清单</h3>
-            <div id="indicatorList" class="modal-list"></div>
+            <div id="indicatorList" class="modal-list reading-list"></div>
           </section>
-          <section class="modal-section">
+          <section class="modal-section section-buy">
             <h3>买入规则</h3>
-            <div id="buyRulesList" class="modal-list"></div>
+            <div id="buyRulesList" class="modal-list reading-list"></div>
           </section>
-          <section class="modal-section">
+          <section class="modal-section section-sell">
             <h3>卖出规则</h3>
-            <div id="sellRulesList" class="modal-list"></div>
+            <div id="sellRulesList" class="modal-list reading-list"></div>
           </section>
-          <section class="modal-section">
+          <section class="modal-section section-notes">
             <h3>说明</h3>
-            <div id="rulesNotes" class="modal-list"></div>
+            <div id="rulesNotes" class="modal-list reading-list"></div>
           </section>
+          </div>
         </div>
       </section>
 
@@ -305,6 +332,32 @@
             <strong id="webhookLastResult">--</strong>
           </div>
         </div>
+
+        <section class="webhook-panel webhook-runtime-panel">
+          <div class="webhook-copy">
+            <h3>后台状态</h3>
+            <p>这里展示当前页面和后台预警服务的同步情况，以及后台 worker 的运行状态。</p>
+          </div>
+          <div class="webhook-runtime-grid">
+            <article class="webhook-runtime-card">
+              <span>同步状态</span>
+              <strong id="webhookRuntimeSyncValue">--</strong>
+            </article>
+            <article class="webhook-runtime-card">
+              <span>Worker 状态</span>
+              <strong id="webhookRuntimeWorkerValue">--</strong>
+            </article>
+            <article class="webhook-runtime-card">
+              <span>上次扫描时间</span>
+              <strong id="webhookRuntimeLastScanValue">--</strong>
+            </article>
+            <article class="webhook-runtime-card">
+              <span>上次发送时间</span>
+              <strong id="webhookRuntimeLastSentValue">--</strong>
+            </article>
+          </div>
+          <p id="webhookRuntimeHint" class="webhook-runtime-hint">--</p>
+        </section>
 
         <section class="webhook-panel">
           <div class="webhook-copy">
@@ -338,6 +391,6 @@
       };
     </script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="{{ url_for('static', filename='app.js', v='20260411m') }}"></script>
+<script src="{{ url_for('static', filename='app.js', v='20260517c') }}"></script>
   </body>
 </html>

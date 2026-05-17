@@ -9,6 +9,7 @@ datas = [
     ("static", "static"),
     ("config.example.json", "."),
     ("custom_strategies.json", "."),
+    ("strategy_presets.json", "."),
 ]
 
 a = Analysis(

@@ -317,7 +317,7 @@ button {
 
 .filters-inline {
   display: grid;
-  grid-template-columns: minmax(110px, 0.78fr) minmax(150px, 1fr) minmax(260px, 1.8fr);
+  grid-template-columns: minmax(110px, 0.72fr) minmax(240px, 1.45fr) minmax(260px, 1.55fr);
   grid-template-areas:
     "source strategy timeframe";
   gap: 6px;
@@ -362,9 +362,14 @@ button {
 
 .strategy-control-row {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   align-items: center;
+}
+
+#strategySelect {
+  min-width: 0;
+  width: 100%;
 }
 
 .strategy-delete-button {
@@ -716,6 +721,7 @@ button {
   color: var(--ink);
   font-size: 12px;
   line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .toast-meta {
@@ -723,6 +729,7 @@ button {
   color: var(--muted);
   font-size: 11px;
   font-family: "IBM Plex Mono", monospace;
+  white-space: pre-wrap;
 }
 
 .suggestion-title {
@@ -1638,6 +1645,13 @@ button {
   gap: 12px;
 }
 
+.signal-drawer-current-rule {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .signal-grid {
   display: grid;
   gap: 10px;
@@ -1676,6 +1690,7 @@ button {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 button.reason-chip {
@@ -1724,6 +1739,17 @@ button.reason-chip {
   overflow: auto;
 }
 
+#rulesModal {
+  width: min(1480px, calc(100vw - 18px));
+  height: calc(100vh - 18px);
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  overflow: hidden;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -1736,6 +1762,10 @@ button.reason-chip {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 14px;
+}
+
+#rulesModal .modal-meta {
+  margin-top: 0;
 }
 
 .rules-current-status {
@@ -1762,7 +1792,34 @@ button.reason-chip {
   flex: 1;
 }
 
-.custom-rule-panel {
+.rules-workspace {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.92fr) minmax(0, 1.48fr);
+  gap: 14px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.rules-overview,
+.rules-detail-grid {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.rules-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rules-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategy-config-panel {
   margin-top: 12px;
   padding: 10px 12px;
   border: 1px solid var(--line);
@@ -1770,72 +1827,268 @@ button.reason-chip {
   background: rgba(255, 255, 255, 0.045);
 }
 
-.custom-rule-copy {
+#rulesModal .rules-current-status {
+  margin-top: 0;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border-color: rgba(39, 194, 170, 0.18);
+  background:
+    linear-gradient(145deg, rgba(39, 194, 170, 0.11), rgba(43, 120, 214, 0.07)),
+    rgba(255, 255, 255, 0.045);
+}
+
+#rulesModal .rules-current-status .strategy-meta {
+  line-height: 1.55;
+}
+
+#rulesModal .strategy-config-panel {
+  margin-top: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.025)),
+    rgba(255, 255, 255, 0.035);
+}
+
+.strategy-config-copy {
   display: grid;
   gap: 4px;
 }
 
-.custom-rule-copy h3 {
+.strategy-config-copy h3 {
   margin: 0;
   font-size: 13px;
 }
 
-.custom-rule-copy p,
-.custom-rule-message {
+.strategy-config-copy p,
+.strategy-config-message {
   margin: 0;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
 }
 
-.custom-rule-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px;
+.strategy-config-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
 }
 
-.custom-rule-input {
-  width: 100%;
-  height: 34px;
-  min-width: 0;
-  padding: 6px 10px;
-  border: 1px solid rgba(39, 194, 170, 0.22);
+.strategy-config-action,
+.strategy-config-save {
+  height: 32px;
+  padding: 0 12px;
   border-radius: 8px;
-  background: rgba(12, 19, 29, 0.78);
-  color: var(--ink);
-  outline: none;
-}
-
-.custom-rule-input:focus {
-  border-color: rgba(39, 194, 170, 0.46);
-  box-shadow: 0 0 0 3px rgba(39, 194, 170, 0.1);
-}
-
-.custom-rule-save {
-  height: 34px;
-  border-radius: 8px;
-  background: rgba(39, 194, 170, 0.16);
-  color: var(--accent);
   font-size: 12px;
   font-weight: 700;
 }
 
-.custom-rule-save:disabled {
+.strategy-config-action {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
+}
+
+.strategy-config-save {
+  background: rgba(39, 194, 170, 0.16);
+  color: var(--accent);
+}
+
+.strategy-config-help-toggle.active {
+  background: rgba(39, 194, 170, 0.14);
+  color: var(--accent);
+  border-color: rgba(39, 194, 170, 0.24);
+}
+
+.strategy-config-action:disabled,
+.strategy-config-save:disabled {
   cursor: default;
   opacity: 0.55;
 }
 
-.custom-rule-message {
+.strategy-config-help {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid rgba(39, 194, 170, 0.16);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(39, 194, 170, 0.08), rgba(39, 194, 170, 0.02)),
+    rgba(7, 13, 20, 0.55);
+}
+
+.strategy-config-help-content {
+  display: grid;
+  gap: 12px;
+}
+
+.strategy-config-help-banner {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.strategy-config-help-banner p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.strategy-config-help-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.strategy-config-help-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.strategy-config-help-badge strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.strategy-config-help-section {
+  display: grid;
+  gap: 10px;
+}
+
+.strategy-config-help-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.strategy-config-help-heading h4 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.strategy-config-help-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.strategy-config-help-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategy-config-help-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.strategy-config-help-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.strategy-config-help-card code,
+.strategy-config-help-example code {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.strategy-config-help-card strong {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.strategy-config-help-tag {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(39, 194, 170, 0.12);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.strategy-config-help-card p,
+.strategy-config-help-example {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.strategy-config-help-note {
+  color: var(--ink);
+}
+
+.strategy-config-input {
+  width: 100%;
+  min-height: 240px;
+  min-width: 0;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(39, 194, 170, 0.22);
+  border-radius: 12px;
+  background: rgba(12, 19, 29, 0.78);
+  color: var(--ink);
+  outline: none;
+  resize: vertical;
+  font: 12px/1.5 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+#rulesModal .strategy-config-input {
+  flex: 1 1 auto;
+  min-height: 360px;
+}
+
+.strategy-config-input:focus {
+  border-color: rgba(39, 194, 170, 0.46);
+  box-shadow: 0 0 0 3px rgba(39, 194, 170, 0.1);
+}
+
+.strategy-config-message {
   min-height: 16px;
   margin-top: 6px;
 }
 
-.custom-rule-message.success {
+.strategy-config-message.success {
   color: var(--accent);
 }
 
-.custom-rule-message.error {
+.strategy-config-message.error {
   color: var(--sell);
 }
 
@@ -1893,6 +2146,67 @@ button.reason-chip {
 }
 
 .webhook-status-message.error {
+  color: var(--sell);
+}
+
+.webhook-runtime-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.webhook-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.webhook-runtime-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.webhook-runtime-card span {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.webhook-runtime-card strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.webhook-runtime-card.is-good {
+  border-color: rgba(39, 194, 170, 0.22);
+  background: rgba(39, 194, 170, 0.08);
+}
+
+.webhook-runtime-card.is-warn {
+  border-color: rgba(246, 162, 26, 0.22);
+  background: rgba(246, 162, 26, 0.08);
+}
+
+.webhook-runtime-card.is-danger {
+  border-color: rgba(200, 82, 67, 0.24);
+  background: rgba(200, 82, 67, 0.08);
+}
+
+.webhook-runtime-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.webhook-runtime-hint.error {
   color: var(--sell);
 }
 
@@ -2016,6 +2330,12 @@ button.reason-chip {
   background: rgba(255, 255, 255, 0.05);
 }
 
+#rulesModal .meta-pill {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .meta-pill span {
   display: block;
   color: var(--muted);
@@ -2036,6 +2356,13 @@ button.reason-chip {
   margin-top: 16px;
 }
 
+.rules-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
 .modal-section {
   min-width: 0;
   padding: 14px;
@@ -2043,14 +2370,180 @@ button.reason-chip {
   background: rgba(255, 255, 255, 0.05);
 }
 
+#rulesModal .modal-section {
+  padding: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.025)),
+    rgba(255, 255, 255, 0.04);
+}
+
 .modal-section h3 {
   margin: 0 0 10px;
+}
+
+#rulesModal .modal-section h3 {
+  margin-bottom: 12px;
+  font-size: 14px;
+  letter-spacing: -0.02em;
+}
+
+.modal-section-wide {
+  grid-column: 1 / -1;
+}
+
+.section-live {
+  order: 1;
+}
+
+.section-blueprint {
+  order: 2;
+}
+
+.section-buy {
+  order: 3;
+}
+
+.section-sell {
+  order: 4;
+}
+
+.section-indicators {
+  order: 5;
+}
+
+.section-notes {
+  order: 6;
 }
 
 .modal-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.reading-list .modal-chip {
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+.section-buy .reading-list .modal-chip {
+  border-color: rgba(20, 150, 107, 0.22);
+  background: rgba(20, 150, 107, 0.08);
+}
+
+.section-sell .reading-list .modal-chip {
+  border-color: rgba(209, 79, 63, 0.22);
+  background: rgba(209, 79, 63, 0.08);
+}
+
+.section-indicators .reading-list .modal-chip,
+.section-notes .reading-list .modal-chip {
+  color: var(--muted);
+}
+
+.strategy-component-card {
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.strategy-component-card.live {
+  background: rgba(10, 16, 24, 0.52);
+}
+
+.strategy-component-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.strategy-component-top strong {
+  display: block;
+  font-size: 13px;
+}
+
+.strategy-component-id,
+.strategy-component-meta {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.strategy-component-timeframe {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(43, 120, 214, 0.14);
+  color: var(--ink);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.strategy-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.strategy-check-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.strategy-check-chip.pass {
+  border-color: rgba(20, 150, 107, 0.28);
+  background: rgba(20, 150, 107, 0.1);
+}
+
+.strategy-check-chip.risk {
+  border-color: rgba(209, 79, 63, 0.28);
+  background: rgba(209, 79, 63, 0.1);
+}
+
+.strategy-check-chip.pending {
+  border-color: rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.strategy-check-chip.warn {
+  border-color: rgba(246, 162, 26, 0.3);
+  background: rgba(246, 162, 26, 0.1);
+}
+
+.strategy-check-title {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.strategy-check-state {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.strategy-check-body {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 @media (max-width: 1420px) {
@@ -2123,6 +2616,15 @@ button.reason-chip {
   .modal-body {
     grid-template-columns: 1fr;
   }
+
+  .rules-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .rules-meta-grid,
+  .rules-detail-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 720px) {
@@ -2162,6 +2664,10 @@ button.reason-chip {
     grid-template-columns: 1fr;
   }
 
+  .webhook-runtime-grid {
+    grid-template-columns: 1fr;
+  }
+
   .search-card {
     grid-template-columns: 1fr;
     align-items: stretch;
@@ -2194,7 +2700,22 @@ button.reason-chip {
     max-height: calc(100vh - 20px);
   }
 
-  .custom-rule-form {
+  #rulesModal {
+    width: calc(100vw - 12px);
+    height: calc(100vh - 12px);
+    padding: 14px;
+  }
+
+  .strategy-config-actions {
+    flex-direction: column;
+  }
+
+  .strategy-config-action,
+  .strategy-config-save {
+    width: 100%;
+  }
+
+  .strategy-config-help-grid {
     grid-template-columns: 1fr;
   }
 

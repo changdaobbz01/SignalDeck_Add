@@ -682,7 +682,9 @@ class EastMoneyClient:
         payload = http_get_json(f"{self.tencent_history_base}?{urlencode(params)}", headers=TENCENT_HEADERS)
         data = (payload.get("data") or {}).get(symbol) or {}
         field_name = f"{adjust_key}{period}" if adjust_key else period
-        rows = data.get(field_name) or []
+        # Tencent period bars still commonly use the plain period key (`day` / `week` / `month`)
+        # even when qfq/hfq is requested, so fall back to the raw period key.
+        rows = data.get(field_name) or data.get(period) or []
         return self._parse_tencent_rows(symbol, rows, data, max_bars)
 
     def _fetch_tencent_intraday_bars(
