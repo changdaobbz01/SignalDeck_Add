@@ -559,14 +559,13 @@ button {
 }
 
 .timeframe-buttons {
-  display: flex;
-  flex-wrap: nowrap;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
 }
 
 .timeframe-buttons button {
   min-width: 0;
-  flex: 1 1 0;
   min-height: 34px;
   padding: 5px 6px;
   border-radius: 10px;
@@ -2607,6 +2606,10 @@ button.reason-chip {
   .source-field .inline-label,
   .timeframe-field .inline-label {
     margin-bottom: 4px;
+  }
+
+  .timeframe-buttons {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .market-grid {

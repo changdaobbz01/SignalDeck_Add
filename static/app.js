@@ -1832,6 +1832,15 @@ function formatTimestampLabel(value, timeframe = state.timeframe, compact = fals
     return raw || "--";
   }
 
+  const formatQuarterLabel = (year, month) => {
+    const monthNumber = Number(month);
+    if (!Number.isFinite(monthNumber) || monthNumber < 1) {
+      return `${year}-Q?`;
+    }
+    const quarter = Math.min(4, Math.max(1, Math.floor((monthNumber - 1) / 3) + 1));
+    return compact ? `${year}-Q${quarter}` : `${year} Q${quarter}`;
+  };
+
   if (digits.length >= 12) {
     const year = digits.slice(0, 4);
     const month = digits.slice(4, 6);
@@ -1848,6 +1857,9 @@ function formatTimestampLabel(value, timeframe = state.timeframe, compact = fals
     const year = digits.slice(0, 4);
     const month = digits.slice(4, 6);
     const day = digits.slice(6, 8);
+    if (timeframe === "1q") {
+      return formatQuarterLabel(year, month);
+    }
     if (compact) {
       if (timeframe === "1w" || timeframe === "1M") {
         return `${year}-${month}`;
@@ -1860,6 +1872,9 @@ function formatTimestampLabel(value, timeframe = state.timeframe, compact = fals
   if (digits.length >= 6) {
     const year = digits.slice(0, 4);
     const month = digits.slice(4, 6);
+    if (timeframe === "1q") {
+      return formatQuarterLabel(year, month);
+    }
     return `${year}-${month}`;
   }
 

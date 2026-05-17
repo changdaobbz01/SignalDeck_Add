@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260517c') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260518a') }}">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   </head>
   <body>
@@ -70,8 +70,11 @@
                     <button data-timeframe="15m" type="button">15m</button>
                     <button data-timeframe="30m" type="button">30m</button>
                     <button data-timeframe="60m" type="button">60m</button>
+                    <button data-timeframe="120m" type="button">120m</button>
                     <button data-timeframe="1d" class="active" type="button">1d</button>
                     <button data-timeframe="1w" type="button">1w</button>
+                    <button data-timeframe="1M" type="button">1M</button>
+                    <button data-timeframe="1q" type="button">1Q</button>
                   </div>
                 </div>
               </div>
@@ -391,6 +394,6 @@
       };
     </script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="{{ url_for('static', filename='app.js', v='20260517c') }}"></script>
+<script src="{{ url_for('static', filename='app.js', v='20260518a') }}"></script>
   </body>
 </html>

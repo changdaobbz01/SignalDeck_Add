@@ -367,6 +367,50 @@ def fetch_strategy_bars_with_source(
     )
 
 
+def fetch_chart_bars_with_source(
+    symbol: str,
+    timeframe: str,
+    max_bars: int,
+    adjust: str,
+    source: str,
+) -> Tuple[str, List[Bar], str]:
+    requested_source = normalize_source_name(source)
+    if timeframe == "120m":
+        name, raw_bars, actual_source = fetch_bars_with_source_cached(
+            symbol,
+            "60m",
+            max(max_bars * 2 + 12, 160),
+            adjust,
+            requested_source,
+            CHART_CACHE_TTL,
+        )
+        bars = aggregate_120m_bars(raw_bars)[-max_bars:]
+        if not bars:
+            raise MarketDataError(f"{symbol} 120m 聚合后没有可用 K 线数据")
+        return name, bars, actual_source
+    if timeframe == "1q":
+        name, raw_bars, actual_source = fetch_bars_with_source_cached(
+            symbol,
+            "1M",
+            max(max_bars * 3 + 6, 48),
+            adjust,
+            requested_source,
+            CHART_CACHE_TTL,
+        )
+        bars = aggregate_quarterly_bars(raw_bars)[-max_bars:]
+        if not bars:
+            raise MarketDataError(f"{symbol} 季线聚合后没有可用 K 线数据")
+        return name, bars, actual_source
+    return fetch_bars_with_source_cached(
+        symbol,
+        timeframe,
+        max_bars,
+        adjust,
+        requested_source,
+        CHART_CACHE_TTL,
+    )
+
+
 def fetch_snapshot_cached(symbol: str, source: str, ttl: float = SNAPSHOT_CACHE_TTL) -> MarketSnapshot:
     requested_source = normalize_source_name(source)
     cache_key = build_response_cache_key("snapshot", symbol, requested_source)
@@ -2105,7 +2149,29 @@ def build_strategy_signal_payload(
         component_cache[cache_key] = payload
         return payload
 
-    payload = evaluate_strategy_record(symbol, strategy, requested_source, fetch_for_strategy)
+    try:
+        payload = evaluate_strategy_record(symbol, strategy, requested_source, fetch_for_strategy)
+    except MarketDataError as exc:
+        message = str(exc)
+        if "Not enough bars for" not in message:
+            raise
+        return {
+            "symbol": symbol,
+            "strategy": strategy_record,
+            "signal": "HOLD",
+            "triggered": False,
+            "timestamp": None,
+            "source": build_source_info(requested_source, requested_source),
+            "priority": {"score": None, "label": "--"},
+            "indicators": {},
+            "reason": f"数据不足，暂不触发：{message}",
+            "details": {
+                "warning_type": "insufficient_bars",
+                "warning_message": message,
+                "components": {},
+            },
+            "alert_key": None,
+        }
     actual_source = str(payload.pop("actual_source") or requested_source)
     payload["strategy"] = strategy_record
     payload["source"] = build_source_info(requested_source, actual_source)
@@ -2601,13 +2667,12 @@ def build_chart_payload(
     source: str,
 ) -> Dict[str, Any]:
     requested_source = normalize_source_name(source)
-    name, bars, actual_source = fetch_bars_with_source_cached(
+    name, bars, actual_source = fetch_chart_bars_with_source(
         symbol,
         timeframe,
         history_bars,
         adjust,
         requested_source,
-        CHART_CACHE_TTL,
     )
     timestamps = [bar.timestamp for bar in bars]
     closes = [bar.close for bar in bars]
