@@ -488,12 +488,198 @@ def atr(
     return result
 
 
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    supports_bars: bool = True
+    supports_snapshot: bool = True
+    supported_timeframes: Tuple[str, ...] = ()
+    supported_adjustments: Tuple[str, ...] = ()
+
+
+class MarketDataProvider:
+    provider_id = ""
+    capabilities = ProviderCapabilities()
+
+    def supports_bars_request(self, timeframe: str, adjust: str) -> bool:
+        if not self.capabilities.supports_bars:
+            return False
+        if self.capabilities.supported_timeframes and timeframe not in self.capabilities.supported_timeframes:
+            return False
+        if self.capabilities.supported_adjustments and adjust not in self.capabilities.supported_adjustments:
+            return False
+        return True
+
+    def supports_snapshot_request(self) -> bool:
+        return self.capabilities.supports_snapshot
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        max_bars: int,
+        adjust: str,
+    ) -> Tuple[str, List[Bar]]:
+        raise NotImplementedError
+
+    def fetch_snapshot(self, symbol: str) -> MarketSnapshot:
+        raise NotImplementedError
+
+
+class LegacyProviderAdapter(MarketDataProvider):
+    def __init__(
+        self,
+        client: "EastMoneyClient",
+        provider_id: str,
+        capabilities: ProviderCapabilities,
+    ) -> None:
+        self.client = client
+        self.provider_id = provider_id
+        self.capabilities = capabilities
+
+
+class EastMoneyProviderAdapter(LegacyProviderAdapter):
+    def __init__(self, client: "EastMoneyClient") -> None:
+        super().__init__(
+            client,
+            "eastmoney",
+            ProviderCapabilities(
+                supports_bars=True,
+                supports_snapshot=True,
+                supported_timeframes=tuple(TIMEFRAME_TO_KLT.keys()),
+                supported_adjustments=tuple(FQT_MAP.keys()),
+            ),
+        )
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        max_bars: int,
+        adjust: str,
+    ) -> Tuple[str, List[Bar]]:
+        return self.client._fetch_bars_eastmoney(symbol, timeframe, max_bars, adjust)
+
+    def fetch_snapshot(self, symbol: str) -> MarketSnapshot:
+        return self.client._fetch_snapshot_eastmoney(symbol)
+
+
+class TencentProviderAdapter(LegacyProviderAdapter):
+    def __init__(self, client: "EastMoneyClient") -> None:
+        super().__init__(
+            client,
+            "tencent",
+            ProviderCapabilities(
+                supports_bars=True,
+                supports_snapshot=True,
+                supported_timeframes=tuple(list(TENCENT_INTRADAY_MAP.keys()) + list(TENCENT_PERIOD_MAP.keys())),
+                supported_adjustments=tuple(TENCENT_ADJUST_MAP.keys()),
+            ),
+        )
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        max_bars: int,
+        adjust: str,
+    ) -> Tuple[str, List[Bar]]:
+        return self.client._fetch_bars_tencent(symbol, timeframe, max_bars, adjust)
+
+    def fetch_snapshot(self, symbol: str) -> MarketSnapshot:
+        return self.client._fetch_snapshot_tencent(symbol)
+
+
+class MarketDataRouter:
+    def __init__(
+        self,
+        providers: Dict[str, MarketDataProvider],
+        health_tracker: SourceHealthTracker,
+    ) -> None:
+        self.providers = providers
+        self.health_tracker = health_tracker
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        max_bars: int,
+        adjust: str,
+        source: str,
+    ) -> Tuple[str, List[Bar], str]:
+        requested_source = normalize_source_name(source)
+        errors: List[str] = []
+        for source_name in self._source_sequence("bars", requested_source):
+            provider = self.providers.get(source_name)
+            if provider is None:
+                errors.append(f"{source_name}: unsupported bar source")
+                continue
+            started_at = time.perf_counter()
+            try:
+                if not provider.supports_bars_request(timeframe, adjust):
+                    raise MarketDataError(f"unsupported bars request for {source_name}: {timeframe}/{adjust}")
+                name, bars = provider.fetch_bars(symbol, timeframe, max_bars, adjust)
+                self.health_tracker.record_success("bars", source_name, (time.perf_counter() - started_at) * 1000.0)
+                return name, bars, source_name
+            except Exception as exc:  # noqa: BLE001
+                self.health_tracker.record_failure(
+                    "bars",
+                    source_name,
+                    (time.perf_counter() - started_at) * 1000.0,
+                    error=str(exc),
+                )
+                errors.append(f"{source_name}: {exc}")
+                if requested_source != "auto":
+                    break
+        raise MarketDataError("; ".join(errors) or f"{symbol} {timeframe} K 线获取失败")
+
+    def fetch_snapshot(self, symbol: str, source: str) -> MarketSnapshot:
+        requested_source = normalize_source_name(source)
+        errors: List[str] = []
+        for source_name in self._source_sequence("snapshot", requested_source):
+            provider = self.providers.get(source_name)
+            if provider is None:
+                errors.append(f"{source_name}: unsupported snapshot source")
+                continue
+            started_at = time.perf_counter()
+            try:
+                if not provider.supports_snapshot_request():
+                    raise MarketDataError(f"unsupported snapshot request for {source_name}")
+                snapshot = provider.fetch_snapshot(symbol)
+                self.health_tracker.record_success(
+                    "snapshot",
+                    source_name,
+                    (time.perf_counter() - started_at) * 1000.0,
+                )
+                return snapshot
+            except Exception as exc:  # noqa: BLE001
+                self.health_tracker.record_failure(
+                    "snapshot",
+                    source_name,
+                    (time.perf_counter() - started_at) * 1000.0,
+                    error=str(exc),
+                )
+                errors.append(f"{source_name}: {exc}")
+                if requested_source != "auto":
+                    break
+        raise MarketDataError("; ".join(errors) or f"{symbol} 行情快照获取失败")
+
+    def _source_sequence(self, category: str, source: str) -> List[str]:
+        if source == "auto":
+            return self.health_tracker.ordered_sources(category)
+        return [source]
+
+
 class EastMoneyClient:
     history_base = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     quote_base = "https://push2.eastmoney.com/api/qt/stock/get"
     tencent_history_base = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
     tencent_minute_base = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
     tencent_quote_base = "https://qt.gtimg.cn/q="
+
+    def __init__(self, providers: Optional[Iterable[MarketDataProvider]] = None) -> None:
+        provider_items = list(providers or [TencentProviderAdapter(self), EastMoneyProviderAdapter(self)])
+        self.providers: Dict[str, MarketDataProvider] = {provider.provider_id: provider for provider in provider_items}
+        self.router = MarketDataRouter(self.providers, SOURCE_HEALTH_TRACKER)
 
     @staticmethod
     def symbol_to_secid(symbol: str) -> str:
@@ -528,76 +714,10 @@ class EastMoneyClient:
         adjust: str,
         source: str = "auto",
     ) -> Tuple[str, List[Bar], str]:
-        requested_source = normalize_source_name(source)
-        errors: List[str] = []
-        for source_name in self._bar_source_sequence(requested_source):
-            started_at = time.perf_counter()
-            try:
-                if source_name == "eastmoney":
-                    name, bars = self._fetch_bars_eastmoney(symbol, timeframe, max_bars, adjust)
-                elif source_name == "tencent":
-                    name, bars = self._fetch_bars_tencent(symbol, timeframe, max_bars, adjust)
-                else:
-                    raise MarketDataError(f"unsupported bar source: {source_name}")
-                SOURCE_HEALTH_TRACKER.record_success(
-                    "bars",
-                    source_name,
-                    (time.perf_counter() - started_at) * 1000.0,
-                )
-                return name, bars, source_name
-            except Exception as exc:  # noqa: BLE001
-                SOURCE_HEALTH_TRACKER.record_failure(
-                    "bars",
-                    source_name,
-                    (time.perf_counter() - started_at) * 1000.0,
-                    error=str(exc),
-                )
-                errors.append(f"{source_name}: {exc}")
-                if requested_source != "auto":
-                    break
-        raise MarketDataError("; ".join(errors) or f"{symbol} {timeframe} K 线获取失败")
+        return self.router.fetch_bars(symbol, timeframe, max_bars, adjust, source)
 
     def fetch_snapshot(self, symbol: str, source: str = "auto") -> MarketSnapshot:
-        requested_source = normalize_source_name(source)
-        errors: List[str] = []
-        for source_name in self._snapshot_source_sequence(requested_source):
-            started_at = time.perf_counter()
-            try:
-                if source_name == "eastmoney":
-                    snapshot = self._fetch_snapshot_eastmoney(symbol)
-                elif source_name == "tencent":
-                    snapshot = self._fetch_snapshot_tencent(symbol)
-                else:
-                    raise MarketDataError(f"unsupported snapshot source: {source_name}")
-                SOURCE_HEALTH_TRACKER.record_success(
-                    "snapshot",
-                    source_name,
-                    (time.perf_counter() - started_at) * 1000.0,
-                )
-                return snapshot
-            except Exception as exc:  # noqa: BLE001
-                SOURCE_HEALTH_TRACKER.record_failure(
-                    "snapshot",
-                    source_name,
-                    (time.perf_counter() - started_at) * 1000.0,
-                    error=str(exc),
-                )
-                errors.append(f"{source_name}: {exc}")
-                if requested_source != "auto":
-                    break
-        raise MarketDataError("; ".join(errors) or f"{symbol} 行情快照获取失败")
-
-    @staticmethod
-    def _bar_source_sequence(source: str) -> List[str]:
-        if source == "auto":
-            return SOURCE_HEALTH_TRACKER.ordered_sources("bars")
-        return [source]
-
-    @staticmethod
-    def _snapshot_source_sequence(source: str) -> List[str]:
-        if source == "auto":
-            return SOURCE_HEALTH_TRACKER.ordered_sources("snapshot")
-        return [source]
+        return self.router.fetch_snapshot(symbol, source)
 
     def _fetch_bars_eastmoney(
         self,
@@ -826,10 +946,13 @@ class EastMoneyClient:
         )
 
 
+MarketDataClient = EastMoneyClient
+
+
 class SignalEngine:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
-        self.client = EastMoneyClient()
+        self.client = MarketDataClient()
 
     def run(self, symbols: List[str]) -> List[SignalResult]:
         results: List[SignalResult] = []

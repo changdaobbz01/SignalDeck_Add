@@ -101,13 +101,29 @@
               "dif >= dea",
               "k >= d"
             ],
+            "low_zone": [
+              "close <= ma20 * 1.08",
+              "between('j', 0, 55)"
+            ],
+            "high_zone": [
+              "close >= ma20 * 1.03",
+              "between('j', 68, 120)"
+            ],
             "double_gold": [
               "cross_over('dif', 'dea')",
               "cross_over('k', 'd')"
             ],
+            "double_gold_recent": [
+              "cross_over_within('dif', 'dea', 4)",
+              "cross_over_within('k', 'd', 4)"
+            ],
             "double_dead": [
               "cross_under('dif', 'dea')",
               "cross_under('k', 'd')"
+            ],
+            "double_dead_recent": [
+              "cross_under_within('dif', 'dea', 4)",
+              "cross_under_within('k', 'd', 4)"
             ],
             "bottom_div": [
               "bullish_divergence('close', 'dif', 48, 3, 4)"
@@ -284,6 +300,472 @@
         "intraday_60m.top_div",
         "intraday_120m.double_dead",
         "intraday_120m.top_div"
+      ]
+    },
+    {
+      "id": "liu_core_v2",
+      "label": "刘昌松核心法则 v2",
+      "description": "按周线定方向、日线做波段、60/120 分钟抓买卖点重组，强化双金双死、5/20/60 日线风控与顶底背离。",
+      "type": "builtin",
+      "mode": "composite",
+      "timeframe": "1w / 1d / 60m / 120m",
+      "primary_component": "intraday_60m",
+      "priority_component": "intraday_60m",
+      "priority_indicator": "j",
+      "indicators": [
+        {
+          "name": "MA5 / MA20 / MA60",
+          "type": "ma",
+          "description": "5/20/60 日均线用于持仓、低吸和风控分层"
+        },
+        {
+          "name": "DIF / DEA",
+          "type": "macd",
+          "description": "MACD 用于双金双死与顶底背离判断"
+        },
+        {
+          "name": "K / D / J",
+          "type": "kdj",
+          "description": "KDJ 用于双金双死确认和强弱优先级"
+        },
+        {
+          "name": "VOL_MA5",
+          "type": "volume",
+          "description": "量价配合用于放量确认和缩量回踩过滤"
+        }
+      ],
+      "buy_rules": [
+        "周线多头背景下，日线双金可作为加仓追涨信号，价格至少站上 60 日线。",
+        "周线偏强且日线回踩 20 日线不破时，配合 60/120 分钟双金或底背离，作为精准低吸买点。",
+        "周线低位双金、日线双死时视作逢低布局信号，优先结合底背离确认，不追高。"
+      ],
+      "sell_rules": [
+        "周线双死或顶背离出现时优先减仓，若日线双金仍在则按逢高减仓理解。",
+        "日线双死视作离场信号；跌破 5 日线减仓，跌破 20 日线止损，跌破 60 日线清仓。",
+        "60/120 分钟双死或顶背离出现时，作为短线卖点和利润保护信号。"
+      ],
+      "notes": [
+        "v2 改成了分支式组合：低吸布局、日线双金追涨、60/120 分钟精准买点分别独立配置。",
+        "卖出侧按周线风险、日线双死、均线破位、分钟级转弱分开建模，更接近原始口诀。",
+        "如果后续还要继续调参，优先调整 buy_cases / sell_cases，而不是把所有条件继续塞进 buy_any。"
+      ],
+      "components": [
+        {
+          "id": "weekly_trend",
+          "label": "周线趋势",
+          "timeframe": "1w",
+          "lookback_bars": 180,
+          "indicator_specs": {
+            "ma20": {
+              "type": "sma",
+              "source": "close",
+              "window": 20
+            },
+            "ma60": {
+              "type": "sma",
+              "source": "close",
+              "window": 60
+            },
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "pass": [
+              "close > ma20",
+              "ma20 >= ma60",
+              "dif >= dea",
+              "k >= d"
+            ],
+            "pass_soft": [
+              "close > ma20",
+              "ma20 >= ma60",
+              "k >= d"
+            ],
+            "low_zone": [
+              "between('j', 0, 40)",
+              "close >= ma60 * 0.98"
+            ],
+            "high_zone": [
+              "between('j', 70, 120)",
+              "close >= ma20"
+            ],
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "double_gold_recent": [
+              "cross_over_within('dif', 'dea', 6)",
+              "cross_over_within('k', 'd', 6)"
+            ],
+            "double_dead": [
+              "cross_under('dif', 'dea')",
+              "cross_under('k', 'd')"
+            ],
+            "double_dead_recent": [
+              "cross_under_within('dif', 'dea', 4)",
+              "cross_under_within('k', 'd', 4)"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 48, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 48, 3, 4)"
+            ]
+          }
+        },
+        {
+          "id": "daily_wave",
+          "label": "日线波段",
+          "timeframe": "1d",
+          "lookback_bars": 220,
+          "indicator_specs": {
+            "ma5": {
+              "type": "sma",
+              "source": "close",
+              "window": 5
+            },
+            "ma20": {
+              "type": "sma",
+              "source": "close",
+              "window": 20
+            },
+            "ma60": {
+              "type": "sma",
+              "source": "close",
+              "window": 60
+            },
+            "vol_ma5": {
+              "type": "sma",
+              "source": "volume",
+              "window": 5
+            },
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "pass": [
+              "close >= ma5",
+              "close >= ma20",
+              "close >= ma60"
+            ],
+            "trend_long": [
+              "close >= ma60"
+            ],
+            "pullback_zone": [
+              "close >= ma20",
+              "near('low', 'ma20', 0.02)",
+              "close >= open"
+            ],
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "double_gold_recent": [
+              "cross_over_within('dif', 'dea', 4)",
+              "cross_over_within('k', 'd', 4)"
+            ],
+            "double_gold_bias": [
+              "dif >= dea",
+              "k >= d"
+            ],
+            "double_dead": [
+              "cross_under('dif', 'dea')",
+              "cross_under('k', 'd')"
+            ],
+            "double_dead_recent": [
+              "cross_under_within('dif', 'dea', 4)",
+              "cross_under_within('k', 'd', 4)"
+            ],
+            "volume_ok": [
+              "volume >= vol_ma5 * 1.02"
+            ],
+            "volume_ok_soft": [
+              "volume >= vol_ma5 * 0.9"
+            ],
+            "break_5": [
+              "close < ma5"
+            ],
+            "break_20": [
+              "close < ma20"
+            ],
+            "break_60": [
+              "close < ma60"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 60, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 60, 3, 4)"
+            ]
+          }
+        },
+        {
+          "id": "intraday_60m",
+          "label": "60分钟买卖点",
+          "timeframe": "60m",
+          "lookback_bars": 200,
+          "indicator_specs": {
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "double_gold_recent": [
+              "cross_over_within('dif', 'dea', 3)",
+              "cross_over_within('k', 'd', 3)"
+            ],
+            "double_gold_bias": [
+              "dif >= dea",
+              "k >= d"
+            ],
+            "double_dead": [
+              "cross_under('dif', 'dea')",
+              "cross_under('k', 'd')"
+            ],
+            "double_dead_recent": [
+              "cross_under_within('dif', 'dea', 3)",
+              "cross_under_within('k', 'd', 3)"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 60, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 60, 3, 4)"
+            ]
+          }
+        },
+        {
+          "id": "intraday_120m",
+          "label": "120分钟确认",
+          "timeframe": "120m",
+          "lookback_bars": 180,
+          "indicator_specs": {
+            "dif": {
+              "type": "macd",
+              "source": "close",
+              "signal_name": "dea",
+              "hist_name": "macd_hist"
+            },
+            "kdj": {
+              "type": "kdj",
+              "k_name": "k",
+              "d_name": "d",
+              "j_name": "j"
+            }
+          },
+          "checks": {
+            "double_gold": [
+              "cross_over('dif', 'dea')",
+              "cross_over('k', 'd')"
+            ],
+            "double_gold_recent": [
+              "cross_over_within('dif', 'dea', 3)",
+              "cross_over_within('k', 'd', 3)"
+            ],
+            "double_gold_bias": [
+              "dif >= dea",
+              "k >= d"
+            ],
+            "double_dead": [
+              "cross_under('dif', 'dea')",
+              "cross_under('k', 'd')"
+            ],
+            "double_dead_recent": [
+              "cross_under_within('dif', 'dea', 3)",
+              "cross_under_within('k', 'd', 3)"
+            ],
+            "bottom_div": [
+              "bullish_divergence('close', 'dif', 60, 3, 4)"
+            ],
+            "top_div": [
+              "bearish_divergence('close', 'dif', 60, 3, 4)"
+            ]
+          }
+        }
+      ],
+      "buy_cases": [
+        {
+          "id": "weekly_layout",
+          "label": "周线低位布局",
+          "action": "build",
+          "action_label": "布局",
+          "priority": 70,
+          "all": [
+            "weekly_trend.low_zone"
+          ],
+          "any": [
+            "weekly_trend.double_gold_recent",
+            "weekly_trend.bottom_div",
+            "daily_wave.bottom_div",
+            "daily_wave.double_dead_recent",
+            "daily_wave.break_5",
+            "daily_wave.pullback_zone"
+          ]
+        },
+        {
+          "id": "daily_double_gold",
+          "label": "日线双金追涨",
+          "action": "add",
+          "action_label": "加仓",
+          "priority": 90,
+          "all": [
+            "weekly_trend.pass_soft",
+            "daily_wave.pass",
+            "daily_wave.volume_ok_soft"
+          ],
+          "any": [
+            "daily_wave.double_gold_recent",
+            "daily_wave.double_gold_bias",
+            "intraday_60m.double_gold_recent",
+            "intraday_120m.double_gold_recent"
+          ]
+        },
+        {
+          "id": "intraday_precise_entry",
+          "label": "60/120分钟精准买点",
+          "action": "buy",
+          "action_label": "买入",
+          "priority": 80,
+          "all": [
+            "weekly_trend.pass_soft",
+            "daily_wave.trend_long",
+            "daily_wave.pullback_zone",
+            "daily_wave.volume_ok_soft"
+          ],
+          "any": [
+            "weekly_trend.bottom_div",
+            "daily_wave.bottom_div",
+            "intraday_60m.double_gold_recent",
+            "intraday_120m.double_gold_recent",
+            "intraday_60m.double_gold_bias",
+            "intraday_120m.double_gold_bias",
+            "intraday_60m.bottom_div",
+            "intraday_120m.bottom_div"
+          ]
+        }
+      ],
+      "sell_cases": [
+        {
+          "id": "weekly_high_reduce",
+          "label": "周线双死高位减仓",
+          "action": "reduce",
+          "action_label": "减仓",
+          "priority": 85,
+          "all": [
+            "weekly_trend.high_zone",
+            "weekly_trend.double_dead_recent"
+          ],
+          "any": [
+            "daily_wave.double_gold_recent",
+            "weekly_trend.top_div",
+            "daily_wave.top_div"
+          ]
+        },
+        {
+          "id": "daily_double_dead_exit",
+          "label": "日线双死离场",
+          "action": "exit",
+          "action_label": "离场",
+          "priority": 95,
+          "all": [
+            "daily_wave.double_dead_recent"
+          ],
+          "any": []
+        },
+        {
+          "id": "ma_break_60_clear",
+          "label": "跌破 60 日线清仓",
+          "action": "clear",
+          "action_label": "清仓",
+          "priority": 120,
+          "all": [
+            "daily_wave.break_60"
+          ],
+          "any": []
+        },
+        {
+          "id": "ma_break_20_exit",
+          "label": "跌破 20 日线离场",
+          "action": "exit",
+          "action_label": "离场",
+          "priority": 100,
+          "all": [
+            "daily_wave.break_20"
+          ],
+          "any": []
+        },
+        {
+          "id": "ma_break_5_reduce",
+          "label": "跌破 5 日线减仓",
+          "action": "reduce",
+          "action_label": "减仓",
+          "priority": 70,
+          "all": [],
+          "any": [
+            "daily_wave.break_5"
+          ]
+        },
+        {
+          "id": "intraday_risk",
+          "label": "分钟级转弱保护利润",
+          "action": "reduce",
+          "action_label": "减仓",
+          "priority": 75,
+          "all": [],
+          "any": [
+            "intraday_60m.double_dead_recent",
+            "intraday_120m.double_dead_recent",
+            "intraday_60m.top_div",
+            "intraday_120m.top_div"
+          ]
+        },
+        {
+          "id": "divergence_reduce",
+          "label": "顶背离减仓",
+          "action": "reduce",
+          "action_label": "减仓",
+          "priority": 80,
+          "all": [
+            "weekly_trend.high_zone"
+          ],
+          "any": [
+            "weekly_trend.top_div",
+            "daily_wave.top_div"
+          ]
+        }
       ]
     },
     {

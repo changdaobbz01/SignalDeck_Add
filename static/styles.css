@@ -203,6 +203,146 @@ button {
   min-width: 0;
 }
 
+.topbar-health-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 clamp(260px, 34vw, 560px);
+  min-width: 200px;
+  height: 34px;
+  padding: 4px 8px;
+  border: 1px solid rgba(39, 194, 170, 0.16);
+  border-radius: 14px;
+  background: rgba(10, 18, 28, 0.72);
+  overflow: hidden;
+}
+
+.topbar-health-strip.empty {
+  justify-content: center;
+  color: var(--muted);
+}
+
+.topbar-health-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.topbar-health-summary strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.topbar-health-summary.ok strong {
+  color: #94f2d0;
+}
+
+.topbar-health-summary.warn strong {
+  color: #ffcf75;
+}
+
+.topbar-health-summary.error strong {
+  color: #ff9c90;
+}
+
+.topbar-health-track {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.topbar-health-track::-webkit-scrollbar {
+  height: 6px;
+}
+
+.topbar-health-track::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+}
+
+.topbar-health-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
+}
+
+.topbar-health-item.ok {
+  border-color: rgba(20, 150, 107, 0.36);
+  background: rgba(20, 150, 107, 0.1);
+}
+
+.topbar-health-item.warn {
+  border-color: rgba(255, 179, 71, 0.36);
+  background: rgba(255, 179, 71, 0.12);
+}
+
+.topbar-health-item.insufficient,
+.topbar-health-item.error {
+  border-color: rgba(200, 82, 67, 0.38);
+  background: rgba(200, 82, 67, 0.12);
+}
+
+.topbar-health-timeframe {
+  color: var(--ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.topbar-health-state {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.topbar-health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.5);
+  flex: 0 0 auto;
+}
+
+.topbar-health-summary.ok .topbar-health-dot,
+.topbar-health-item.ok .topbar-health-dot {
+  background: #1ecf8e;
+}
+
+.topbar-health-summary.warn .topbar-health-dot,
+.topbar-health-item.warn .topbar-health-dot {
+  background: #ffbf58;
+}
+
+.topbar-health-summary.error .topbar-health-dot,
+.topbar-health-item.insufficient .topbar-health-dot,
+.topbar-health-item.error .topbar-health-dot {
+  background: #ff8b7d;
+}
+
+.topbar-health-hint {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -625,11 +765,12 @@ button {
 .strategy-meta {
   min-width: 0;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.25;
+  font-size: 5px;
+  line-height: 1.1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: block;
 }
 
 .suggestions {
@@ -1673,6 +1814,62 @@ button {
   letter-spacing: -0.05em;
 }
 
+.signal-action-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.signal-action-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  line-height: 1;
+  color: #f4f7fa;
+  background: rgba(255, 255, 255, 0.06);
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease,
+    border-color 140ms ease,
+    opacity 140ms ease;
+}
+
+.signal-action-chip:hover {
+  transform: translateY(-1px);
+}
+
+.signal-action-chip.buy {
+  border-color: rgba(209, 79, 63, 0.2);
+  background: rgba(209, 79, 63, 0.14);
+  color: var(--rise);
+}
+
+.signal-action-chip.sell {
+  border-color: rgba(20, 150, 107, 0.2);
+  background: rgba(20, 150, 107, 0.14);
+  color: var(--fall);
+}
+
+.signal-action-chip.zero {
+  border-color: rgba(148, 163, 184, 0.14);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--muted);
+}
+
+.signal-action-chip.active {
+  box-shadow: 0 0 0 1px rgba(244, 247, 250, 0.16), 0 10px 20px rgba(0, 0, 0, 0.18);
+}
+
+.signal-action-chip.zero:not(.active) {
+  opacity: 0.72;
+}
+
 .reason-list {
   display: flex;
   flex-direction: column;
@@ -1770,10 +1967,10 @@ button.reason-chip {
 .rules-current-status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   margin-top: 12px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.045);
@@ -1789,6 +1986,7 @@ button.reason-chip {
 
 .rules-current-status .strategy-meta {
   flex: 1;
+  min-width: 0;
 }
 
 .rules-workspace {
@@ -1829,8 +2027,8 @@ button.reason-chip {
 #rulesModal .rules-current-status {
   margin-top: 0;
   align-items: flex-start;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 8px;
+  padding: 10px 12px;
   border-radius: 18px;
   border-color: rgba(39, 194, 170, 0.18);
   background:
@@ -1839,7 +2037,8 @@ button.reason-chip {
 }
 
 #rulesModal .rules-current-status .strategy-meta {
-  line-height: 1.55;
+  font-size: 5px;
+  line-height: 1.1;
 }
 
 #rulesModal .strategy-config-panel {
@@ -1869,8 +2068,8 @@ button.reason-chip {
 .strategy-config-message {
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 .strategy-config-actions {

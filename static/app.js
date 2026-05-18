@@ -88,6 +88,10 @@ const state = {
   isLoadingAlertRuntime: false,
   isApplyingAlertRuntime: false,
   hasLoadedAlertRuntime: false,
+  signalDrawerActionFilters: {
+    BUY: "",
+    SELL: "",
+  },
 };
 
 const dom = {
@@ -98,6 +102,7 @@ const dom = {
   watchlistButton: document.getElementById("watchlistButton"),
   refreshStatus: document.getElementById("refreshStatus"),
   activeSourceLabel: document.getElementById("activeSourceLabel"),
+  strategyHealthStrip: document.getElementById("strategyHealthStrip"),
   sourceSelect: document.getElementById("sourceSelect"),
   strategySelect: document.getElementById("strategySelect"),
   rulesButton: document.getElementById("rulesButton"),
@@ -134,6 +139,8 @@ const dom = {
   watchlistImportInput: document.getElementById("watchlistImportInput"),
   buyCount: document.getElementById("buyCount"),
   sellCount: document.getElementById("sellCount"),
+  buyActionSummary: document.getElementById("buyActionSummary"),
+  sellActionSummary: document.getElementById("sellActionSummary"),
   buyReasons: document.getElementById("buyReasons"),
   sellReasons: document.getElementById("sellReasons"),
   warnings: document.getElementById("warnings"),
@@ -352,6 +359,8 @@ function normalizeWatchlistStrategySignal(payload) {
     symbol,
     name: String(payload?.name || "").trim(),
     signal,
+    action: String(payload?.action || "").trim().toLowerCase(),
+    action_label: String(payload?.action_label || "").trim(),
     triggered: Boolean(payload?.triggered),
     strategy_id: normalizeStrategyValue(payload?.strategy?.id),
     strategy: payload?.strategy && typeof payload.strategy === "object" ? payload.strategy : null,
@@ -461,9 +470,39 @@ function watchlistStrategySignalClass(signal) {
   return "neutral";
 }
 
+function strategyActionLabel(strategySignal) {
+  const explicit = String(strategySignal?.action_label || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  const action = String(strategySignal?.action || "").trim().toLowerCase();
+  const signal = String(strategySignal?.signal || "").trim().toUpperCase();
+  const labels = {
+    buy: "买入",
+    build: "布局",
+    add: "加仓",
+    reduce: "减仓",
+    exit: "离场",
+    clear: "清仓",
+    hold: "观望",
+    sell: "卖出",
+  };
+  if (labels[action]) {
+    return labels[action];
+  }
+  if (signal === "BUY") return "买入";
+  if (signal === "SELL") return "卖出";
+  if (signal === "HOLD") return "观望";
+  return "";
+}
+
 function watchlistStrategySignalLabel(strategySignal) {
   const rawTimeframe = String(strategySignal?.strategy?.timeframe || "").trim();
   const prefix = rawTimeframe && !rawTimeframe.includes("·") && !rawTimeframe.includes("/") ? rawTimeframe : "STRAT";
+  const actionLabel = strategyActionLabel(strategySignal);
+  if (actionLabel) {
+    return `${prefix} ${actionLabel}`;
+  }
   return `${prefix} ${String(strategySignal?.signal || "--").toUpperCase()}`;
 }
 
@@ -2075,6 +2114,25 @@ function buildStrategyDecisionText(payload) {
   const { side, group } = resolved;
   const title = side === "sell" ? "卖出组合" : "买入组合";
   const parts = [];
+  if (String(group.mode || "").trim().toLowerCase() === "cases") {
+    let focusCase = null;
+    for (const key of ["active_case", "candidate_case"]) {
+      const candidate = group?.[key];
+      if (candidate && typeof candidate === "object") {
+        focusCase = candidate;
+        break;
+      }
+    }
+    const caseLabel = String((focusCase || {}).label || "").trim();
+    if (caseLabel) {
+      const caseTitle = Boolean(group.triggered) ? "命中分支" : "关注分支";
+      parts.push(`${caseTitle} [${caseLabel}]`);
+    }
+    const actionLabel = String((focusCase || {}).action_label || group.action_label || "").trim();
+    if (actionLabel) {
+      parts.push(`动作 [${actionLabel}]`);
+    }
+  }
   const matchedAll = Array.isArray(group.matched_all) ? group.matched_all : [];
   const matchedAny = Array.isArray(group.matched_any) ? group.matched_any : [];
   const missingAll = Array.isArray(group.missing_all) ? group.missing_all : [];
@@ -2339,6 +2397,10 @@ function describeWebhookRuleMeta(entry, signal, strategySignal) {
 function buildWebhookReasonContext(row, signal) {
   const strategySignal = row?.strategySignal || {};
   const normalizedSignal = String(signal || "").trim().toUpperCase();
+  const action = String(strategySignal?.action || normalizedSignal.toLowerCase())
+    .trim()
+    .toLowerCase();
+  const actionLabel = String(strategySignal?.action_label || "").trim();
   const decisionState = collectWebhookDecisionEntries(strategySignal, normalizedSignal);
   const primaryEntries = [...decisionState.primaryEntries].sort(
     (left, right) => webhookRulePriority(right, normalizedSignal) - webhookRulePriority(left, normalizedSignal)
@@ -2362,6 +2424,9 @@ function buildWebhookReasonContext(row, signal) {
   return {
     category: "signal",
     signal_type: normalizedSignal.toLowerCase(),
+    signal_action: action,
+    action,
+    action_label: actionLabel,
     rule_family: meta.familyId,
     rule_family_label: meta.familyLabel,
     rule_name: primaryEntry?.ref || meta.familyId,
@@ -2373,7 +2438,7 @@ function buildWebhookReasonContext(row, signal) {
     reason_details: reasonDetails,
     supporting_reasons: supportingReasons,
     decision_text: decisionState.decisionText || "",
-    message_title: `${webhookSignalLabel(normalizedSignal)} | ${meta.titleLabel}`,
+    message_title: `${webhookSignalLabel(normalizedSignal)} | ${actionLabel || meta.titleLabel}`,
     action_hint: meta.actionHint,
   };
 }
@@ -2383,6 +2448,7 @@ function buildWebhookMessageText(payload) {
   const symbol = String(payload?.symbol || "").trim().toUpperCase();
   const name = String(payload?.name || "").trim();
   const strategy = String(payload?.strategy_label || payload?.strategy || "").trim();
+  const actionLabel = String(payload?.action_label || "").trim();
   const source = String(payload?.source_label || payload?.source || "").trim();
   const timestamp = String(payload?.timestamp || "").trim().replace("T", " ").replace("Z", "");
   const reasonSummary = String(payload?.reason_summary || payload?.reason || "").trim();
@@ -2399,6 +2465,9 @@ function buildWebhookMessageText(payload) {
   }
   if (strategy) {
     lines.push(`\u7b56\u7565\uff1a${strategy}`);
+  }
+  if (actionLabel) {
+    lines.push(`\u52a8\u4f5c\uff1a${actionLabel}`);
   }
   if (reasonSummary) {
     lines.push(`\u4e3b\u56e0\uff1a${reasonSummary}`);
@@ -2644,6 +2713,95 @@ function renderReasons(container, items, emptyText) {
   });
 }
 
+function normalizeSignalDrawerSide(signal) {
+  return String(signal || "").trim().toUpperCase() === "BUY" ? "BUY" : "SELL";
+}
+
+function currentSignalDrawerActionFilter(signal) {
+  const side = normalizeSignalDrawerSide(signal);
+  return String(state.signalDrawerActionFilters?.[side] || "").trim().toLowerCase();
+}
+
+function setSignalDrawerActionFilter(signal, action) {
+  const side = normalizeSignalDrawerSide(signal);
+  const normalizedAction = String(action || "").trim().toLowerCase();
+  const current = currentSignalDrawerActionFilter(side);
+  state.signalDrawerActionFilters = {
+    ...(state.signalDrawerActionFilters || {}),
+    [side]: current === normalizedAction ? "" : normalizedAction,
+  };
+  renderSignalDrawerFromWatchlist();
+}
+
+function signalActionSummaryConfig(signal) {
+  if (String(signal || "").trim().toUpperCase() === "BUY") {
+    return [
+      { action: "build", label: "布局" },
+      { action: "add", label: "加仓" },
+      { action: "buy", label: "买入" },
+    ];
+  }
+  return [
+    { action: "reduce", label: "减仓" },
+    { action: "exit", label: "离场" },
+    { action: "clear", label: "清仓" },
+  ];
+}
+
+function renderSignalActionSummary(container, rows, signal) {
+  if (!container) return;
+  container.innerHTML = "";
+  const normalizedSignal = String(signal || "").trim().toUpperCase();
+  const selectedAction = currentSignalDrawerActionFilter(normalizedSignal);
+  const counts = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const action = String(row?.strategySignal?.action || "").trim().toLowerCase();
+    if (!action) return;
+    counts.set(action, (counts.get(action) || 0) + 1);
+  });
+
+  signalActionSummaryConfig(normalizedSignal).forEach((item) => {
+    const count = Number(counts.get(item.action) || 0);
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `signal-action-chip ${normalizedSignal === "BUY" ? "buy" : "sell"}${count === 0 ? " zero" : ""}${selectedAction === item.action ? " active" : ""}`;
+    chip.setAttribute("aria-pressed", selectedAction === item.action ? "true" : "false");
+    chip.textContent = `${item.label} ${count}`;
+    chip.title = count > 0 ? `点击只看${item.label}` : `当前没有${item.label}命中`;
+    chip.addEventListener("click", () => {
+      if (count <= 0 && selectedAction !== item.action) return;
+      setSignalDrawerActionFilter(normalizedSignal, item.action);
+    });
+    container.appendChild(chip);
+  });
+}
+
+function filterSignalDrawerRowsByAction(rows, signal) {
+  const selectedAction = currentSignalDrawerActionFilter(signal);
+  if (!selectedAction) {
+    return Array.isArray(rows) ? rows : [];
+  }
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const action = String(row?.strategySignal?.action || "").trim().toLowerCase();
+    return action === selectedAction;
+  });
+}
+
+function signalActionLabelByValue(signal, action) {
+  return (
+    signalActionSummaryConfig(signal).find((item) => item.action === String(action || "").trim().toLowerCase())?.label || ""
+  );
+}
+
+function signalDrawerEmptyText(signal, action) {
+  const sideLabel = normalizeSignalDrawerSide(signal) === "BUY" ? "买入" : "卖出";
+  const actionLabel = signalActionLabelByValue(signal, action);
+  if (actionLabel) {
+    return `当前自选池没有${actionLabel}命中。`;
+  }
+  return `当前自选池没有${sideLabel}命中。`;
+}
+
 function buildWatchlistSignalItem(row) {
   const { item, quote, strategySignal } = row;
   const symbol = String(item?.symbol || strategySignal?.symbol || "").trim().toLowerCase();
@@ -2652,6 +2810,7 @@ function buildWatchlistSignalItem(row) {
   const price = quote ? formatFixed(quote.last_price, 3) : "--";
   const change = quote ? formatPercent(quote.change_pct) : "--";
   const signal = String(strategySignal?.signal || "--").toUpperCase();
+  const actionLabel = strategyActionLabel(strategySignal);
   const priorityLabel = String(strategySignal?.priority?.label || strategySignal?.priority_label || "").trim();
   const priority = priorityLabel && priorityLabel !== "--"
     ? ` | ${priorityLabel}`
@@ -2660,7 +2819,8 @@ function buildWatchlistSignalItem(row) {
   const jText = Number.isFinite(jValue) ? ` | J ${formatFixed(jValue, 2)}` : "";
   const decisionText = buildStrategyDecisionText(strategySignal);
   const reasonText = decisionText || (strategySignal?.reason ? `依据：${strategySignal.reason}` : "");
-  const header = `${labelSymbol} ${name} | ${price} | ${change} | ${signal}${priority}${jText}`;
+  const signalText = actionLabel ? `${signal} · ${actionLabel}` : signal;
+  const header = `${labelSymbol} ${name} | ${price} | ${change} | ${signalText}${priority}${jText}`;
   return {
     symbol,
     text: reasonText ? `${header}\n${reasonText}` : header,
@@ -3200,6 +3360,8 @@ function renderSignalDrawerFromWatchlist() {
   if (strategyOff) {
     dom.buyCount.textContent = `0 / ${total}`;
     dom.sellCount.textContent = `0 / ${total}`;
+    renderSignalActionSummary(dom.buyActionSummary, [], "BUY");
+    renderSignalActionSummary(dom.sellActionSummary, [], "SELL");
     renderReasons(dom.buyReasons, [], "当前未启用策略，选择规则后显示自选池买入命中。");
     renderReasons(dom.sellReasons, [], "当前未启用策略，选择规则后显示自选池卖出命中。");
     renderWarnings([]);
@@ -3220,11 +3382,23 @@ function renderSignalDrawerFromWatchlist() {
     const signal = String(row.strategySignal?.signal || "").toUpperCase();
     return row.strategySignal?.triggered && signal === "SELL";
   });
+  const filteredBuyRows = filterSignalDrawerRowsByAction(buyRows, "BUY");
+  const filteredSellRows = filterSignalDrawerRowsByAction(sellRows, "SELL");
 
   dom.buyCount.textContent = `${buyRows.length} / ${total}`;
   dom.sellCount.textContent = `${sellRows.length} / ${total}`;
-  renderReasons(dom.buyReasons, buyRows.map(buildWatchlistSignalItem), "当前自选池没有买入命中。");
-  renderReasons(dom.sellReasons, sellRows.map(buildWatchlistSignalItem), "当前自选池没有卖出命中。");
+  renderSignalActionSummary(dom.buyActionSummary, buyRows, "BUY");
+  renderSignalActionSummary(dom.sellActionSummary, sellRows, "SELL");
+  renderReasons(
+    dom.buyReasons,
+    filteredBuyRows.map(buildWatchlistSignalItem),
+    signalDrawerEmptyText("BUY", currentSignalDrawerActionFilter("BUY"))
+  );
+  renderReasons(
+    dom.sellReasons,
+    filteredSellRows.map(buildWatchlistSignalItem),
+    signalDrawerEmptyText("SELL", currentSignalDrawerActionFilter("SELL"))
+  );
   renderWarnings([]);
 }
 
@@ -3982,21 +4156,34 @@ function renderStrategyOptions() {
 function renderStrategyError(message) {
   dom.strategySignalBadge.textContent = "ERR";
   dom.strategySignalBadge.className = "strategy-pill neutral";
-  dom.strategySignalMeta.textContent = message || "Strategy signal load failed";
+  setStrategyMetaText("策略信号加载失败", message || "Strategy signal load failed");
+  renderStrategyHealthStrip(null, message || "策略数据状态加载失败");
 }
 
 function buildStrategyMetaText(payload) {
-  const strategyLabel = payload?.strategy?.label || getStrategyMeta(state.strategy)?.label || "Strategy";
-  const parts = [strategyLabel];
-  const strategyTimeframe = String(payload?.strategy?.timeframe || "").trim();
-  const displayTimeframe = strategyDisplayTimeframe(payload);
+  const parts = [];
+  const actionLabel = strategyActionLabel(payload);
+  const reason = String(payload?.reason || "").trim();
+  if (payload?.triggered && actionLabel) {
+    parts.push(actionLabel);
+  } else if (payload?.signal) {
+    parts.push(String(payload.signal).trim().toUpperCase());
+  }
+  if (reason) {
+    parts.push(reason);
+  }
+  return parts.join(" · ");
+}
 
-  if (strategyTimeframe) {
-    const prefix =
-      strategyTimeframe.includes("路") || strategyTimeframe.includes("/") || strategyTimeframe.includes("·")
-        ? "Frames"
-        : "Fixed";
-    parts.push(`${prefix} ${strategyTimeframe}`);
+function buildStrategyMetaTitle(payload) {
+  const parts = [];
+  const displayTimeframe = strategyDisplayTimeframe(payload);
+  const actionLabel = strategyActionLabel(payload);
+
+  if (payload?.triggered && actionLabel) {
+    parts.push(actionLabel);
+  } else if (payload?.signal) {
+    parts.push(String(payload.signal).trim().toUpperCase());
   }
 
   if (payload?.reason) {
@@ -4004,9 +4191,7 @@ function buildStrategyMetaText(payload) {
   }
 
   if (payload?.priority?.label && payload.priority.label !== "--") {
-    const score = Number(payload.priority.score);
-    const scoreText = Number.isFinite(score) ? ` (${formatFixed(score, 2)})` : "";
-    parts.push(`Priority ${payload.priority.label}${scoreText}`);
+    parts.push(`优先级 ${payload.priority.label}`);
   }
 
   const jValue = Number(payload?.indicators?.j);
@@ -4021,12 +4206,182 @@ function buildStrategyMetaText(payload) {
   return parts.join(" | ");
 }
 
+function compactStrategyMetaFallback(strategyMeta, mode = "idle") {
+  const label = String(strategyMeta?.label || "策略").trim();
+  if (mode === "off") {
+    return `${label} 已关闭`;
+  }
+  if (mode === "error") {
+    return `${label} 加载失败`;
+  }
+  return `${label} · 等待本轮信号刷新`;
+}
+
+function setStrategyMetaText(text, title = "") {
+  if (!dom.strategySignalMeta) {
+    return;
+  }
+  const compact = String(text || "").trim();
+  const fullTitle = String(title || compact).trim();
+  dom.strategySignalMeta.textContent = compact || "--";
+  dom.strategySignalMeta.title = fullTitle || compact || "--";
+}
+
+function strategyHealthTone(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "ok") return "ok";
+  if (normalized === "warn") return "warn";
+  if (["insufficient", "error"].includes(normalized)) return "error";
+  return "pending";
+}
+
+function deriveStrategyHealthFromDetails(payload) {
+  const components = payload?.details?.components;
+  if (!components || typeof components !== "object") {
+    return null;
+  }
+  const items = Object.values(components).map((component) => {
+    const warningSet = new Set();
+    Object.values(component?.checks || {}).forEach((check) => {
+      (check?.warnings || []).forEach((warning) => {
+        const text = String(warning || "").trim();
+        if (text) {
+          warningSet.add(text);
+        }
+      });
+    });
+    const warnings = [...warningSet];
+    const status = warnings.length > 0 ? "warn" : "ok";
+    return {
+      id: String(component?.id || "").trim().toLowerCase(),
+      label: String(component?.label || component?.id || "组件").trim(),
+      timeframe: String(component?.timeframe || "--").trim(),
+      actual_source_label: String(component?.actual_source || "").trim(),
+      status,
+      status_label: status === "warn" ? "警告" : "正常",
+      message: warnings[0] || "数据正常",
+      timestamp: component?.timestamp || null,
+      bars: Number(component?.bar_count || 0),
+      min_bars: Number(component?.min_bars || 0),
+      warnings,
+    };
+  });
+  const warningCount = items.filter((item) => item.status === "warn").length;
+  const summaryStatus = warningCount > 0 ? "warn" : "ok";
+  return {
+    status: summaryStatus,
+    status_label: summaryStatus === "warn" ? "警告" : "正常",
+    summary: warningCount > 0 ? `${warningCount} 个周期存在规则告警` : "当前策略周期数据正常",
+    is_reliable: items.length > 0,
+    counts: {
+      total: items.length,
+      healthy: items.filter((item) => item.status === "ok").length,
+      warn: warningCount,
+      degraded: 0,
+    },
+    items,
+  };
+}
+
+function resolveStrategyHealth(payload) {
+  const health = payload?.details?.health;
+  if (health && typeof health === "object") {
+    return health;
+  }
+  return deriveStrategyHealthFromDetails(payload);
+}
+
+function renderStrategyHealthStrip(payload = null, fallbackMessage = "") {
+  const container = dom.strategyHealthStrip;
+  if (!container) {
+    return;
+  }
+
+  const strategyMeta = getStrategyMeta(state.strategy);
+  if (normalizeStrategyValue(state.strategy) === "none") {
+    container.className = "topbar-health-strip empty";
+    container.title = "当前策略已关闭";
+    container.textContent = "当前策略已关闭";
+    return;
+  }
+
+  const health = resolveStrategyHealth(payload);
+  if (!payload && !fallbackMessage) {
+    container.className = "topbar-health-strip empty";
+    container.title = String(strategyMeta?.description || "等待策略周期状态刷新").trim();
+    container.textContent = "正在加载周期状态…";
+    return;
+  }
+
+  if (!health || !Array.isArray(health.items)) {
+    container.className = "topbar-health-strip empty";
+    container.title = String(fallbackMessage || "策略周期状态暂不可用").trim();
+    container.textContent = fallbackMessage || "策略周期状态暂不可用";
+    return;
+  }
+
+  container.className = "topbar-health-strip";
+  container.title = String(health.summary || "").trim();
+  container.innerHTML = "";
+
+  const summary = document.createElement("div");
+  summary.className = `topbar-health-summary ${strategyHealthTone(health.status)}`;
+  const counts = health?.counts || {};
+  const total = Number(counts.total || health.items.length || 0);
+  const healthy = Number(counts.healthy || 0);
+  const degraded = Number(counts.degraded || 0);
+  const warn = Number(counts.warn || 0);
+  const statText =
+    degraded > 0
+      ? `${degraded} 异常`
+      : warn > 0
+        ? `${warn} 告警`
+        : total > 0
+          ? `${healthy}/${total}`
+          : "等待";
+  summary.innerHTML = `
+    <strong>${health.status_label || "状态"}</strong>
+    <span class="topbar-health-dot" aria-hidden="true"></span>
+    <span class="topbar-health-hint">${statText}</span>
+  `;
+  container.appendChild(summary);
+
+  const track = document.createElement("div");
+  track.className = "topbar-health-track";
+  health.items.forEach((item) => {
+    const node = document.createElement("div");
+    const status = String(item?.status || "").trim().toLowerCase();
+    node.className = `topbar-health-item ${status || "pending"}`;
+    const sourceText = String(item?.actual_source_label || item?.actual_source || "--").trim();
+    const message = String(item?.message || "").trim();
+    const bars = Number(item?.bars || 0);
+    const minBars = Number(item?.min_bars || 0);
+    node.title = [
+      `${String(item?.label || item?.id || "组件").trim()} (${String(item?.timeframe || "--").trim()})`,
+      `状态：${item?.status_label || "未知"}`,
+      sourceText ? `来源：${sourceText}` : "",
+      minBars > 0 ? `样本：${bars}/${minBars}` : "",
+      message,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    node.innerHTML = `
+      <span class="topbar-health-dot" aria-hidden="true"></span>
+      <span class="topbar-health-timeframe">${String(item?.timeframe || "--").trim()}</span>
+      <span class="topbar-health-state">${String(item?.status_label || "未知").trim()}</span>
+    `;
+    track.appendChild(node);
+  });
+  container.appendChild(track);
+}
+
 function renderStrategySignal(payload = null) {
   const strategyMeta = getStrategyMeta(state.strategy);
   if (normalizeStrategyValue(state.strategy) === "none") {
     dom.strategySignalBadge.textContent = "OFF";
     dom.strategySignalBadge.className = "strategy-pill off";
-    dom.strategySignalMeta.textContent = strategyMeta?.description || "Strategy alerts are off";
+    setStrategyMetaText(compactStrategyMetaFallback(strategyMeta, "off"), strategyMeta?.description || "Strategy alerts are off");
+    renderStrategyHealthStrip(null);
     if (state.rulesModalOpen && state.rulesPayload) {
       renderStrategyComponentStatuses(dom.strategyComponentStatusList, state.rulesPayload.components || [], null);
     }
@@ -4036,7 +4391,11 @@ function renderStrategySignal(payload = null) {
   if (!payload) {
     dom.strategySignalBadge.textContent = "SCAN";
     dom.strategySignalBadge.className = "strategy-pill neutral";
-    dom.strategySignalMeta.textContent = strategyMeta?.description || "Waiting for strategy refresh";
+    setStrategyMetaText(
+      compactStrategyMetaFallback(strategyMeta, "idle"),
+      strategyMeta?.description || "Waiting for strategy refresh"
+    );
+    renderStrategyHealthStrip(null);
     if (state.rulesModalOpen && state.rulesPayload) {
       renderStrategyComponentStatuses(dom.strategyComponentStatusList, state.rulesPayload.components || [], null);
     }
@@ -4046,7 +4405,8 @@ function renderStrategySignal(payload = null) {
   const signal = String(payload.signal || "HOLD").toUpperCase();
   dom.strategySignalBadge.textContent = signal;
   dom.strategySignalBadge.className = `strategy-pill ${strategyPillClass(signal)}`;
-  dom.strategySignalMeta.textContent = buildStrategyMetaText(payload);
+  setStrategyMetaText(buildStrategyMetaText(payload), buildStrategyMetaTitle(payload));
+  renderStrategyHealthStrip(payload);
   if (state.rulesModalOpen && state.rulesPayload) {
     renderStrategyComponentStatuses(
       dom.strategyComponentStatusList,
@@ -4113,7 +4473,8 @@ function maybeShowStrategyToast(payload, options = {}) {
     titleParts.push(name);
   }
   if (signal) {
-    titleParts.push(signal);
+    const actionLabel = strategyActionLabel(payload);
+    titleParts.push(actionLabel ? `${signal} · ${actionLabel}` : signal);
   }
   const strategyLabel = payload?.strategy?.label || getStrategyMeta(state.strategy)?.label || "策略";
   const decisionText = buildStrategyDecisionText(payload);

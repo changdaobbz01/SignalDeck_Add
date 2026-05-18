@@ -17,10 +17,12 @@ from urllib.request import urlopen
 
 
 APP_NAME = "Signal Deck"
+APP_RUNTIME_ID = "SignalDeck"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 HEALTH_ENDPOINT = "/api/health"
 STARTUP_TIMEOUT_SECONDS = 25.0
+HEALTH_PROBE_TIMEOUT_SECONDS = 1.5
 PORT_SCAN_LIMIT = 20
 
 
@@ -77,20 +79,44 @@ def find_available_port(start_port: int = DEFAULT_PORT) -> int:
 
 def wait_for_health(base_url: str, timeout_seconds: float = STARTUP_TIMEOUT_SECONDS) -> dict[str, object]:
     deadline = time.time() + timeout_seconds
-    url = f"{base_url}{HEALTH_ENDPOINT}"
     last_error: Exception | None = None
     while time.time() < deadline:
         try:
-            with urlopen(url, timeout=1.5) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-                if response.status == 200 and payload.get("status") == "ok":
-                    return payload
+            payload = fetch_health_once(base_url, timeout_seconds=HEALTH_PROBE_TIMEOUT_SECONDS)
+            if payload:
+                return payload
         except Exception as exc:  # noqa: BLE001
             last_error = exc
         time.sleep(0.4)
     if last_error:
         raise RuntimeError(f"Server did not become ready: {last_error}") from last_error
     raise RuntimeError("Server did not become ready in time")
+
+
+def fetch_health_once(base_url: str, timeout_seconds: float = HEALTH_PROBE_TIMEOUT_SECONDS) -> dict[str, object] | None:
+    url = f"{base_url}{HEALTH_ENDPOINT}"
+    with urlopen(url, timeout=timeout_seconds) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+        if response.status != 200 or payload.get("status") != "ok":
+            return None
+        runtime_id = str(payload.get("app") or "").strip()
+        if runtime_id and runtime_id != APP_RUNTIME_ID:
+            return None
+        return payload
+
+
+def find_running_service(start_port: int = DEFAULT_PORT) -> tuple[str, int] | None:
+    for port in range(start_port, start_port + PORT_SCAN_LIMIT):
+        if not is_port_open(port):
+            continue
+        base_url = f"http://{HOST}:{port}"
+        try:
+            payload = fetch_health_once(base_url)
+        except Exception:  # noqa: BLE001
+            payload = None
+        if payload:
+            return base_url, port
+    return None
 
 
 def run_server_process() -> None:
@@ -166,6 +192,17 @@ class SignalDeckLauncher:
         ttk.Button(button_row, text="Exit", command=self.handle_close, style="Launcher.TButton").pack(side="right")
 
     def start_server(self) -> None:
+        existing_service = find_running_service(int(os.getenv("APP_PORT", str(DEFAULT_PORT))))
+        if existing_service:
+            self.base_url, port = existing_service
+            self.url_var.set(self.base_url)
+            self.port_var.set(str(port))
+            self.status_var.set("Connected to existing local service")
+            self.server_ready = True
+            self.open_button.configure(state="normal")
+            self.open_browser()
+            return
+
         try:
             port = find_available_port(int(os.getenv("APP_PORT", str(DEFAULT_PORT))))
         except Exception as exc:  # noqa: BLE001

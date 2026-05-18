@@ -129,6 +129,8 @@ def normalize_strategy_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     strategy["buy_any"] = [str(item).strip() for item in strategy.get("buy_any") or [] if str(item).strip()]
     strategy["sell_all"] = [str(item).strip() for item in strategy.get("sell_all") or [] if str(item).strip()]
     strategy["sell_any"] = [str(item).strip() for item in strategy.get("sell_any") or [] if str(item).strip()]
+    strategy["buy_cases"] = _normalize_ref_cases(strategy.get("buy_cases") or [])
+    strategy["sell_cases"] = _normalize_ref_cases(strategy.get("sell_cases") or [])
 
     if not strategy["primary_component"]:
         strategy["primary_component"] = components[0]["id"]
@@ -183,6 +185,51 @@ def _normalize_indicator_specs(raw: Any) -> List[Dict[str, Any]]:
                 continue
             specs.append(copy.deepcopy(value))
     return specs
+
+
+def _normalize_ref_cases(raw_cases: Any) -> List[Dict[str, Any]]:
+    cases: List[Dict[str, Any]] = []
+    for index, raw_case in enumerate(raw_cases or []):
+        if not isinstance(raw_case, dict):
+            continue
+        case_id = str(raw_case.get("id") or f"case_{index + 1}").strip().lower()
+        if not case_id:
+            continue
+        label = str(raw_case.get("label") or case_id).strip() or case_id
+        all_refs = [str(item).strip() for item in raw_case.get("all") or [] if str(item).strip()]
+        any_refs = [str(item).strip() for item in raw_case.get("any") or [] if str(item).strip()]
+        if not all_refs and not any_refs:
+            continue
+        cases.append(
+            {
+                "id": case_id,
+                "label": label,
+                "all": all_refs,
+                "any": any_refs,
+                "action": str(raw_case.get("action") or "").strip().lower(),
+                "action_label": str(raw_case.get("action_label") or "").strip(),
+                "priority": int(raw_case.get("priority") or 0),
+            }
+        )
+    return cases
+
+
+def action_label_for_value(value: str, signal: str = "") -> str:
+    normalized = str(value or "").strip().lower()
+    signal_upper = str(signal or "").strip().upper()
+    if not normalized:
+        return "买入" if signal_upper == "BUY" else "卖出" if signal_upper == "SELL" else ""
+    mapping = {
+        "buy": "买入",
+        "build": "布局",
+        "add": "加仓",
+        "reduce": "减仓",
+        "exit": "离场",
+        "clear": "清仓",
+        "hold": "观望",
+        "sell": "卖出",
+    }
+    return mapping.get(normalized, normalized.replace("_", " ").title())
 
 
 def _normalize_timeframe(value: Any) -> str:
@@ -255,27 +302,42 @@ def _evaluate_composite_strategy(
     for component in strategy.get("components") or []:
         component_results[component["id"]] = _evaluate_component(component, fetch_bars)
 
-    buy_hit = _refs_all_true(strategy.get("buy_all") or [], component_results) and _refs_any_true(
+    buy_case_states = _build_ref_case_states(strategy.get("buy_cases") or [], component_results)
+    sell_case_states = _build_ref_case_states(strategy.get("sell_cases") or [], component_results)
+    buy_hit = _resolve_side_trigger(
+        strategy.get("buy_all") or [],
         strategy.get("buy_any") or [],
+        buy_case_states,
         component_results,
     )
-    sell_hit = _refs_all_true(strategy.get("sell_all") or [], component_results) and _refs_any_true(
+    sell_hit = _resolve_side_trigger(
+        strategy.get("sell_all") or [],
         strategy.get("sell_any") or [],
+        sell_case_states,
         component_results,
     )
-    decision = _build_composite_decision_logic(strategy, component_results, buy_hit, sell_hit)
+    decision = _build_composite_decision_logic(
+        strategy,
+        component_results,
+        buy_hit,
+        sell_hit,
+        buy_case_states,
+        sell_case_states,
+    )
     reason = _build_composite_reason(strategy, component_results, buy_hit, sell_hit, decision)
 
     primary_id = str(strategy.get("primary_component") or "").strip().lower()
     priority_id = str(strategy.get("priority_component") or primary_id).strip().lower()
     primary_component = component_results.get(primary_id) or next(iter(component_results.values()))
     priority_component = component_results.get(priority_id) or primary_component
-    signal, priority_score, priority_label = _resolve_signal_and_priority(
+    signal, priority_score, priority_label = _resolve_composite_signal_and_priority(
         buy_hit,
         sell_hit,
+        decision,
         priority_component["indicator_payload"],
         strategy.get("priority_indicator") or "j",
     )
+    action, action_label = _resolve_decision_action(signal, decision)
 
     timestamp = primary_component["timestamp"]
     return {
@@ -292,15 +354,19 @@ def _evaluate_composite_strategy(
         },
         "indicators": priority_component["indicator_payload"],
         "reason": reason,
+        "action": action,
+        "action_label": action_label,
         "details": {
             "components": component_results,
             "buy_all": list(strategy.get("buy_all") or []),
             "buy_any": list(strategy.get("buy_any") or []),
+            "buy_cases": copy.deepcopy(strategy.get("buy_cases") or []),
             "sell_all": list(strategy.get("sell_all") or []),
             "sell_any": list(strategy.get("sell_any") or []),
+            "sell_cases": copy.deepcopy(strategy.get("sell_cases") or []),
             "decision": decision,
         },
-        "alert_key": f"{strategy['id']}:{symbol}:{signal}:{timestamp}",
+        "alert_key": f"{strategy['id']}:{symbol}:{signal}:{action or signal.lower()}:{timestamp}",
     }
 
 
@@ -339,6 +405,8 @@ def _evaluate_component(
         "name": name,
         "timestamp": bars[-1].timestamp,
         "actual_source": actual_source,
+        "bar_count": len(bars),
+        "min_bars": int(component.get("min_bars") or 35),
         "checks": checks,
         "indicator_payload": indicator_payload,
     }
@@ -440,6 +508,12 @@ def _build_rule_contexts(
     def cross_under(left: str, right: str) -> bool:
         return _cross_compare(rule_context, left, right, direction="under")
 
+    def cross_over_within(left: str, right: str, bars: int = 3) -> bool:
+        return _cross_compare_within(series_context, left, right, direction="over", bars=bars)
+
+    def cross_under_within(left: str, right: str, bars: int = 3) -> bool:
+        return _cross_compare_within(series_context, left, right, direction="under", bars=bars)
+
     def bullish_divergence(
         price_name: str = "close",
         indicator_name: str = "dif",
@@ -481,11 +555,22 @@ def _build_rule_contexts(
             return False
         return abs(float(left_value) - float(right_value)) / abs(float(right_value)) <= float(pct)
 
+    def between(name: str, lower: float, upper: float) -> bool:
+        value = _context_value(rule_context, name)
+        if value is None:
+            return False
+        low = min(float(lower), float(upper))
+        high = max(float(lower), float(upper))
+        return low <= float(value) <= high
+
     rule_context["cross_over"] = cross_over
     rule_context["cross_under"] = cross_under
+    rule_context["cross_over_within"] = cross_over_within
+    rule_context["cross_under_within"] = cross_under_within
     rule_context["bullish_divergence"] = bullish_divergence
     rule_context["bearish_divergence"] = bearish_divergence
     rule_context["near"] = near
+    rule_context["between"] = between
     rule_context["abs"] = abs
     rule_context["min"] = min
     rule_context["max"] = max
@@ -576,6 +661,38 @@ def _cross_compare(context: Dict[str, Any], left: str, right: str, direction: st
     if direction == "over":
         return float(left_now) > float(right_now) and float(left_prev) <= float(right_prev)
     return float(left_now) < float(right_now) and float(left_prev) >= float(right_prev)
+
+
+def _cross_compare_within(
+    series_context: Dict[str, List[Optional[float]]],
+    left: str,
+    right: str,
+    direction: str,
+    bars: int,
+) -> bool:
+    left_series = _context_series(series_context, left)
+    right_series = _context_series(series_context, right)
+    if not left_series or not right_series:
+        return False
+
+    count = min(len(left_series), len(right_series))
+    if count < 2:
+        return False
+
+    within = max(1, int(bars))
+    start_index = max(1, count - within)
+    for index in range(start_index, count):
+        left_now = left_series[index]
+        right_now = right_series[index]
+        left_prev = left_series[index - 1]
+        right_prev = right_series[index - 1]
+        if None in (left_now, right_now, left_prev, right_prev):
+            continue
+        if direction == "over" and float(left_now) > float(right_now) and float(left_prev) <= float(right_prev):
+            return True
+        if direction != "over" and float(left_now) < float(right_now) and float(left_prev) >= float(right_prev):
+            return True
+    return False
 
 
 def _detect_divergence(
@@ -783,6 +900,15 @@ def _build_composite_reason(
         refs.extend([ref for ref in strategy.get("sell_any") or [] if _ref_result(ref, component_results)])
         return _summarize_refs(refs, component_results)
     if buy_hit and sell_hit:
+        preferred_side = str((decision or {}).get("active_side") or "").strip().lower()
+        if preferred_side == "sell":
+            entries = _decision_entries(decision, "sell")
+            if entries:
+                return _summarize_decision_entries(entries)
+        if preferred_side == "buy":
+            entries = _decision_entries(decision, "buy")
+            if entries:
+                return _summarize_decision_entries(entries)
         return "Buy and sell conditions matched at the same time"
     return f"{strategy.get('label') or strategy.get('id')} conditions not met"
 
@@ -792,31 +918,74 @@ def _build_composite_decision_logic(
     component_results: Dict[str, Dict[str, Any]],
     buy_hit: bool,
     sell_hit: bool,
+    buy_case_states: List[Dict[str, Any]],
+    sell_case_states: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    buy_state = _build_side_decision_logic(
+        strategy.get("buy_all") or [],
+        strategy.get("buy_any") or [],
+        buy_case_states,
+        component_results,
+        buy_hit,
+    )
+    sell_state = _build_side_decision_logic(
+        strategy.get("sell_all") or [],
+        strategy.get("sell_any") or [],
+        sell_case_states,
+        component_results,
+        sell_hit,
+    )
+
     if buy_hit and not sell_hit:
         active_side = "buy"
     elif sell_hit and not buy_hit:
         active_side = "sell"
     elif buy_hit and sell_hit:
-        active_side = "both"
+        buy_priority = _decision_side_priority(buy_state)
+        sell_priority = _decision_side_priority(sell_state)
+        active_side = "sell" if sell_priority >= buy_priority else "buy"
     else:
         active_side = "none"
 
     return {
         "active_side": active_side,
-        "buy": _build_ref_group_logic(
-            strategy.get("buy_all") or [],
-            strategy.get("buy_any") or [],
-            component_results,
-            buy_hit,
-        ),
-        "sell": _build_ref_group_logic(
-            strategy.get("sell_all") or [],
-            strategy.get("sell_any") or [],
-            component_results,
-            sell_hit,
-        ),
+        "buy": buy_state,
+        "sell": sell_state,
     }
+
+
+def _build_side_decision_logic(
+    all_refs: List[str],
+    any_refs: List[str],
+    case_states: List[Dict[str, Any]],
+    component_results: Dict[str, Dict[str, Any]],
+    triggered: bool,
+) -> Dict[str, Any]:
+    if not case_states:
+        group = _build_ref_group_logic(all_refs, any_refs, component_results, triggered)
+        group["mode"] = "legacy"
+        group["action"] = ""
+        group["action_label"] = ""
+        return group
+
+    matched_cases = [copy.deepcopy(case) for case in case_states if case.get("triggered")]
+    focus_case = _select_focus_case(case_states)
+    active_case = copy.deepcopy(_select_focus_case(matched_cases)) if matched_cases else None
+    candidate_case = None if matched_cases else copy.deepcopy(focus_case) if focus_case else None
+    focus_state = active_case or candidate_case
+    if focus_state:
+        group = copy.deepcopy(focus_state)
+    else:
+        group = _build_ref_group_logic([], [], component_results, triggered)
+    group["mode"] = "cases"
+    group["triggered"] = triggered
+    group["cases"] = [copy.deepcopy(case) for case in case_states]
+    group["matched_cases"] = matched_cases
+    group["active_case"] = active_case
+    group["candidate_case"] = candidate_case
+    group["action"] = str((focus_state or {}).get("action") or "").strip().lower()
+    group["action_label"] = str((focus_state or {}).get("action_label") or "").strip()
+    return group
 
 
 def _build_ref_group_logic(
@@ -840,6 +1009,66 @@ def _build_ref_group_logic(
         "matched_any": matched_any,
         "missing_all": missing_all,
     }
+
+
+def _build_ref_case_states(
+    cases: List[Dict[str, Any]],
+    component_results: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    case_states: List[Dict[str, Any]] = []
+    for index, case in enumerate(cases):
+        state = _build_ref_group_logic(
+            list(case.get("all") or []),
+            list(case.get("any") or []),
+            component_results,
+            False,
+        )
+        state["id"] = str(case.get("id") or f"case_{index + 1}").strip().lower()
+        state["label"] = str(case.get("label") or state["id"]).strip() or state["id"]
+        state["index"] = index
+        state["action"] = str(case.get("action") or "").strip().lower()
+        state["action_label"] = str(case.get("action_label") or "").strip()
+        state["priority"] = int(case.get("priority") or 0)
+        state["triggered"] = bool(state.get("all_ok")) and bool(state.get("any_ok"))
+        case_states.append(state)
+    return case_states
+
+
+def _resolve_side_trigger(
+    all_refs: List[str],
+    any_refs: List[str],
+    case_states: List[Dict[str, Any]],
+    component_results: Dict[str, Dict[str, Any]],
+) -> bool:
+    if case_states:
+        return any(bool(case.get("triggered")) for case in case_states)
+    return _refs_all_true(all_refs, component_results) and _refs_any_true(any_refs, component_results)
+
+
+def _select_focus_case(case_states: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not case_states:
+        return None
+
+    def score(case: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
+        matched_all = len(case.get("matched_all") or [])
+        matched_any = len(case.get("matched_any") or [])
+        missing_all = len(case.get("missing_all") or [])
+        return (
+            1 if case.get("triggered") else 0,
+            int(case.get("priority") or 0),
+            1 if case.get("any_ok") else 0,
+            matched_all + matched_any,
+            -missing_all,
+        )
+
+    best_score: Optional[Tuple[int, int, int, int, int]] = None
+    best_case: Optional[Dict[str, Any]] = None
+    for case in case_states:
+        current_score = score(case)
+        if best_score is None or current_score > best_score:
+            best_score = current_score
+            best_case = case
+    return best_case
 
 
 def _build_ref_detail(ref: str, component_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -867,6 +1096,44 @@ def _decision_entries(decision: Optional[Dict[str, Any]], side: str) -> List[Dic
     matched_all = list(side_state.get("matched_all") or [])
     matched_any = list(side_state.get("matched_any") or [])
     return matched_all + matched_any
+
+
+def _resolve_decision_action(signal: str, decision: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    normalized_signal = str(signal or "").strip().upper()
+    if not decision or normalized_signal not in {"BUY", "SELL"}:
+        return "", ""
+    side_state = decision.get("buy" if normalized_signal == "BUY" else "sell") or {}
+    action = str(side_state.get("action") or "").strip().lower()
+    action_label = str(side_state.get("action_label") or "").strip()
+    if not action_label:
+        action_label = action_label_for_value(action or normalized_signal.lower(), normalized_signal)
+    return action or normalized_signal.lower(), action_label
+
+
+def _decision_side_priority(side_state: Optional[Dict[str, Any]]) -> int:
+    if not isinstance(side_state, dict):
+        return 0
+    focus = side_state.get("active_case") or side_state.get("candidate_case") or {}
+    try:
+        return int(focus.get("priority") or side_state.get("priority") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _resolve_composite_signal_and_priority(
+    buy_hit: bool,
+    sell_hit: bool,
+    decision: Optional[Dict[str, Any]],
+    indicator_payload: Dict[str, Optional[float]],
+    priority_indicator: str,
+) -> Tuple[str, Optional[float], str]:
+    if buy_hit and sell_hit:
+        preferred_side = str((decision or {}).get("active_side") or "").strip().lower()
+        if preferred_side == "buy":
+            buy_hit, sell_hit = True, False
+        elif preferred_side == "sell":
+            buy_hit, sell_hit = False, True
+    return _resolve_signal_and_priority(buy_hit, sell_hit, indicator_payload, priority_indicator)
 
 
 def _summarize_refs(refs: List[str], component_results: Dict[str, Dict[str, Any]]) -> str:

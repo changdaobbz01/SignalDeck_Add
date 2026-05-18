@@ -13,29 +13,34 @@ from datetime import datetime
 from threading import Event, Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from flask import Flask, jsonify, render_template, request
 
 from market_signal_tool import (
-    EastMoneyClient,
     Bar,
     MarketDataError,
+    MarketDataClient,
     MarketSnapshot,
     SOURCE_HEALTH_TRACKER,
     SOURCE_METADATA,
     SignalEngine,
-    http_get_json,
     load_config,
     macd,
     normalize_source_name,
     sma,
     source_label,
 )
+from security_search import (
+    SecuritySearchService,
+    normalize_import_query as normalize_import_query_value,
+    normalize_query_symbol as normalize_query_symbol_value,
+)
 from strategy_engine import (
     SUPPORTED_STRATEGY_TIMEFRAMES,
+    action_label_for_value,
     collect_divergence_pairs,
     evaluate_strategy_record,
     load_strategy_catalog,
@@ -87,21 +92,8 @@ ensure_runtime_file(STRATEGY_OVERRIDES_PATH, "", '{"strategies":{}}\n')
 ensure_runtime_file(
     ALERT_RUNTIME_PATH,
     "",
-    '{"watchlist":{"items":[]},"strategy":"liu_core_v1","source":"auto","webhook":{"url":"","enabled_symbols":[],"alert_states":{},"logs":[]}}\n',
+    '{"watchlist":{"items":[]},"strategy":"liu_core_v2","source":"auto","webhook":{"url":"","enabled_symbols":[],"alert_states":{},"logs":[]}}\n',
 )
-SEARCH_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"
-SEARCH_BASE = "https://searchapi.eastmoney.com/api/suggest/get"
-CLIST_BASE = "https://push2.eastmoney.com/api/qt/clist/get"
-CLIST_UT = "bd1d9ddb04089700cf9c27f6f7426281"
-CLIST_PAGE_SIZE = 100
-SEARCH_UNIVERSE_TTL = 6 * 60 * 60
-SEARCH_UNIVERSE_SEGMENTS = [
-    ("b:MK0021,b:MK0022,b:MK0023,b:MK0024", "ETF"),
-]
-SEARCH_UNIVERSE_CACHE: Dict[str, Any] = {"items": [], "loaded_at": 0.0}
-SEARCH_UNIVERSE_LOCK = Lock()
-PREFIX_SEGMENT_CACHE: Dict[str, Any] = {}
-PREFIX_SEGMENT_LOCK = Lock()
 STRATEGY_CONFIG_LOCK = Lock()
 RESPONSE_CACHE: Dict[str, Dict[str, Any]] = {}
 RESPONSE_CACHE_LOCK = Lock()
@@ -128,13 +120,15 @@ ALERT_WORKER_STATE: Dict[str, Any] = {
     "last_sent_count": 0,
 }
 
+APP_RUNTIME_ID = "SignalDeck"
+APP_RUNTIME_LABEL = "Signal Deck"
 DEFAULT_SYMBOL = "sh000001"
 DEFAULT_TIMEFRAME = "1d"
 DEFAULT_ADJUST = "qfq"
 DEFAULT_SOURCE = os.getenv("APP_SOURCE", "auto")
 DEFAULT_HOST = os.getenv("APP_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("APP_PORT", "8000"))
-DEFAULT_STRATEGY = "liu_core_v1"
+DEFAULT_STRATEGY = "liu_core_v2"
 STRATEGY_TIMEFRAMES = set(SUPPORTED_STRATEGY_TIMEFRAMES)
 CUSTOM_VALUE_LABELS = {
     "DIF": "MACD DIF 快线",
@@ -190,7 +184,8 @@ app = Flask(
     static_folder=os.path.join(RESOURCE_DIR, "static"),
 )
 app.json.ensure_ascii = False
-client = EastMoneyClient()
+client = MarketDataClient()
+search_service = SecuritySearchService()
 
 
 def build_response_cache_key(prefix: str, *parts: Any) -> str:
@@ -893,6 +888,8 @@ def normalize_alert_runtime_states(raw: Any) -> Dict[str, Dict[str, Any]]:
             signal = "HOLD"
         cleaned[symbol] = {
             "signal": signal,
+            "action": str(value.get("action") or "").strip().lower(),
+            "actionLabel": str(value.get("actionLabel") or "").strip(),
             "dayKey": str(value.get("dayKey") or "").strip(),
             "lastAlertDayKey": str(value.get("lastAlertDayKey") or "").strip(),
             "updatedAt": str(value.get("updatedAt") or "").strip(),
@@ -1477,10 +1474,16 @@ def component_check_label(name: str) -> str:
         "sell": "卖出条件",
         "buy_ready": "买入就绪",
         "sell_ready": "卖出就绪",
+        "low_zone": "周线低档",
+        "high_zone": "周线高档",
         "double_gold": "双金",
+        "double_gold_recent": "近期双金",
         "double_dead": "双死",
+        "double_dead_recent": "近期双死",
         "bottom_div": "底背离",
         "top_div": "顶背离",
+        "trend_long": "站上 60 日线",
+        "pullback_zone": "回踩 20 日线企稳",
         "volume_ok": "量能确认",
         "break_5": "跌破 5 线",
         "break_20": "跌破 20 线",
@@ -1536,6 +1539,20 @@ def build_strategy_decision_text(payload: Dict[str, Any]) -> str:
     side, group = resolved
     title = "卖出组合" if side == "sell" else "买入组合"
     parts: List[str] = []
+    if str(group.get("mode") or "").strip().lower() == "cases":
+        focus_case = None
+        for key in ("active_case", "candidate_case"):
+            candidate = group.get(key)
+            if isinstance(candidate, dict):
+                focus_case = candidate
+                break
+        case_label = str((focus_case or {}).get("label") or "").strip()
+        if case_label:
+            case_title = "命中分支" if bool(group.get("triggered")) else "关注分支"
+            parts.append(f"{case_title} [{case_label}]")
+        action_label = str((focus_case or {}).get("action_label") or group.get("action_label") or "").strip()
+        if action_label:
+            parts.append(f"动作 [{action_label}]")
     matched_all = list(group.get("matched_all") or []) if isinstance(group, dict) else []
     matched_any = list(group.get("matched_any") or []) if isinstance(group, dict) else []
     missing_all = list(group.get("missing_all") or []) if isinstance(group, dict) else []
@@ -1637,7 +1654,9 @@ def webhook_rule_priority(entry: Dict[str, Any], signal: str) -> int:
             "break_60": 120,
             "break_20": 110,
             "double_dead": 100,
+            "double_dead_recent": 100,
             "break_5": 90,
+            "high_zone": 85,
             "sell": 80,
             "pass": 50,
             "volume_ok": 60,
@@ -1646,7 +1665,9 @@ def webhook_rule_priority(entry: Dict[str, Any], signal: str) -> int:
         weights = {
             "bottom_div": 120,
             "double_gold": 110,
+            "double_gold_recent": 110,
             "buy": 90,
+            "low_zone": 80,
             "pass": 70,
             "volume_ok": 60,
         }
@@ -1664,7 +1685,7 @@ def build_webhook_rule_summary(entry: Dict[str, Any], strategy_signal: Dict[str,
         return f"{component_label}出现底背离" if component_label else "底背离"
     if check_id == "sell" and "divergence" in strategy_id:
         return f"{component_label}出现顶背离" if component_label else "顶背离"
-    if check_id in {"bottom_div", "top_div", "double_gold", "double_dead"}:
+    if check_id in {"bottom_div", "top_div", "double_gold", "double_dead", "double_gold_recent", "double_dead_recent"}:
         return f"{component_label}出现{check_label}" if component_label else check_label
     return format_decision_entry_label(entry)
 
@@ -1690,7 +1711,7 @@ def describe_webhook_rule_meta(entry: Optional[Dict[str, Any]], signal: str, str
             "rule_label": "顶背离",
             "action_hint": "优先保护利润，观察是否继续转弱。",
         }
-    if check_id == "double_gold":
+    if check_id in {"double_gold", "double_gold_recent"}:
         return {
             "family_id": "double_gold",
             "family_label": "双金双死",
@@ -1698,7 +1719,7 @@ def describe_webhook_rule_meta(entry: Optional[Dict[str, Any]], signal: str, str
             "rule_label": component_check_label(check_id),
             "action_hint": "优先关注后续量能和回踩确认，避免追涨。",
         }
-    if check_id == "double_dead":
+    if check_id in {"double_dead", "double_dead_recent"}:
         return {
             "family_id": "double_dead",
             "family_label": "双金双死",
@@ -1734,6 +1755,14 @@ def describe_webhook_rule_meta(entry: Optional[Dict[str, Any]], signal: str, str
             "title_label": "趋势转弱" if signal == "SELL" else "多周期共振",
             "rule_label": component_check_label(check_id),
             "action_hint": "大周期条件已对齐，继续观察后续确认信号。",
+        }
+    if check_id in {"low_zone", "high_zone", "trend_long", "pullback_zone"}:
+        return {
+            "family_id": "stage_filter",
+            "family_label": "阶段过滤",
+            "title_label": component_check_label(check_id),
+            "rule_label": component_check_label(check_id),
+            "action_hint": "这类条件主要用于区分当前所处阶段，最好结合双金双死或背离一起看。",
         }
     if check_id == "buy":
         return {
@@ -1803,11 +1832,16 @@ def build_runtime_webhook_payload(
             break
 
     source_info = quote_payload.get("source") if isinstance(quote_payload.get("source"), dict) else {}
+    signal_action = str(strategy_signal.get("action") or signal.lower()).strip().lower() or signal.lower()
+    action_label = str(strategy_signal.get("action_label") or action_label_for_value(signal_action, signal)).strip()
     payload = {
         "event": "signal_state_change",
         "category": "signal",
         "signal": signal,
         "signal_type": signal.lower(),
+        "signal_action": signal_action,
+        "action": signal_action,
+        "action_label": action_label,
         "symbol": symbol,
         "name": str(strategy_signal.get("name") or quote_payload.get("name") or symbol.upper()).strip(),
         "strategy": (strategy_signal.get("strategy") or {}).get("id") or DEFAULT_STRATEGY,
@@ -1829,7 +1863,7 @@ def build_runtime_webhook_payload(
         "reason_details": reason_details,
         "supporting_reasons": supporting_reasons,
         "decision_text": str(decision_state.get("decision_text") or "").strip(),
-        "message_title": f"{'卖出' if signal == 'SELL' else '买入'} | {meta['title_label']}",
+        "message_title": f"{'卖出' if signal == 'SELL' else '买入'} | {action_label or meta['title_label']}",
         "action_hint": meta["action_hint"],
     }
     return payload
@@ -1874,6 +1908,119 @@ def build_strategy_components_payload(strategy: Dict[str, Any]) -> List[Dict[str
             }
         )
     return components
+
+
+def strategy_health_status_label(status: str) -> str:
+    mapping = {
+        "ok": "正常",
+        "warn": "警告",
+        "insufficient": "缺失",
+        "error": "错误",
+        "pending": "等待",
+    }
+    return mapping.get(str(status or "").strip().lower(), "未知")
+
+
+def _collect_component_check_warnings(component_result: Dict[str, Any]) -> List[str]:
+    warnings: List[str] = []
+    for check in (component_result.get("checks") or {}).values():
+        for warning in check.get("warnings") or []:
+            text = str(warning or "").strip()
+            if text and text not in warnings:
+                warnings.append(text)
+    return warnings
+
+
+def build_strategy_health_payload(
+    symbol: str,
+    strategy: Dict[str, Any],
+    requested_source: str,
+    component_results: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    entries: List[Dict[str, Any]] = []
+    component_results = component_results or {}
+
+    for component in strategy.get("components") or []:
+        component_id = str(component.get("id") or "").strip().lower()
+        label = str(component.get("label") or component_id or "组件").strip() or "组件"
+        timeframe = str(component.get("timeframe") or "--").strip() or "--"
+        min_bars = max(35, int(component.get("min_bars") or 60))
+        lookback_bars = max(int(component.get("lookback_bars") or 160), min_bars)
+        result = component_results.get(component_id) or {}
+        warnings = _collect_component_check_warnings(result)
+
+        entry: Dict[str, Any] = {
+            "id": component_id,
+            "label": label,
+            "timeframe": timeframe,
+            "requested_source": requested_source,
+            "requested_source_label": source_label(requested_source),
+            "actual_source": str(result.get("actual_source") or requested_source).strip() or requested_source,
+            "actual_source_label": source_label(str(result.get("actual_source") or requested_source).strip() or requested_source),
+            "status": "pending",
+            "status_label": strategy_health_status_label("pending"),
+            "message": "",
+            "timestamp": result.get("timestamp"),
+            "bars": int(result.get("bar_count") or 0),
+            "min_bars": int(result.get("min_bars") or min_bars),
+            "warnings": warnings,
+        }
+
+        if result:
+            entry["status"] = "warn" if warnings else "ok"
+            entry["status_label"] = strategy_health_status_label(entry["status"])
+            entry["message"] = warnings[0] if warnings else "数据正常"
+            entries.append(entry)
+            continue
+
+        try:
+            _, bars, actual_source = fetch_strategy_bars_with_source(symbol, timeframe, lookback_bars, requested_source)
+            entry["actual_source"] = actual_source
+            entry["actual_source_label"] = source_label(actual_source)
+            entry["bars"] = len(bars)
+            entry["timestamp"] = bars[-1].timestamp if bars else None
+            if len(bars) < min_bars:
+                entry["status"] = "insufficient"
+                entry["message"] = f"数据不足 {len(bars)}/{min_bars}"
+            else:
+                entry["status"] = "ok"
+                entry["message"] = "数据正常"
+        except Exception as exc:  # noqa: BLE001
+            entry["status"] = "error"
+            entry["message"] = str(exc)
+
+        entry["status_label"] = strategy_health_status_label(str(entry.get("status") or "pending"))
+        entries.append(entry)
+
+    degraded_count = sum(1 for entry in entries if entry.get("status") in {"insufficient", "error"})
+    warning_count = sum(1 for entry in entries if entry.get("status") == "warn")
+    healthy_count = sum(1 for entry in entries if entry.get("status") == "ok")
+
+    summary_status = "ok"
+    summary_message = "当前策略周期数据正常"
+    if not entries:
+        summary_status = "pending"
+        summary_message = "等待策略刷新"
+    elif degraded_count > 0:
+        summary_status = "error"
+        summary_message = f"{degraded_count} 个周期缺失或异常，当前规则预判可能失真"
+    elif warning_count > 0:
+        summary_status = "warn"
+        summary_message = f"{warning_count} 个周期存在规则告警，建议结合盘面复核"
+
+    return {
+        "status": summary_status,
+        "status_label": strategy_health_status_label(summary_status),
+        "summary": summary_message,
+        "is_reliable": degraded_count == 0 and bool(entries),
+        "counts": {
+            "total": len(entries),
+            "healthy": healthy_count,
+            "warn": warning_count,
+            "degraded": degraded_count,
+        },
+        "items": entries,
+    }
 
 
 def build_rules_payload(strategy_name: str = DEFAULT_STRATEGY) -> Dict[str, Any]:
@@ -2131,6 +2278,16 @@ def build_strategy_signal_payload(
             "priority": {"score": None, "label": "--"},
             "indicators": {},
             "reason": "当前策略已关闭。",
+            "details": {
+                "health": {
+                    "status": "pending",
+                    "status_label": strategy_health_status_label("pending"),
+                    "summary": "当前策略已关闭",
+                    "is_reliable": False,
+                    "counts": {"total": 0, "healthy": 0, "warn": 0, "degraded": 0},
+                    "items": [],
+                }
+            },
             "alert_key": None,
         }
 
@@ -2153,8 +2310,13 @@ def build_strategy_signal_payload(
         payload = evaluate_strategy_record(symbol, strategy, requested_source, fetch_for_strategy)
     except MarketDataError as exc:
         message = str(exc)
-        if "Not enough bars for" not in message:
-            raise
+        health_payload = build_strategy_health_payload(symbol, strategy, requested_source)
+        warning_type = "insufficient_bars" if "Not enough bars for" in message else "data_error"
+        reason = (
+            f"数据不足，暂不触发：{message}"
+            if warning_type == "insufficient_bars"
+            else f"策略数据异常，暂不触发：{message}"
+        )
         return {
             "symbol": symbol,
             "strategy": strategy_record,
@@ -2164,356 +2326,43 @@ def build_strategy_signal_payload(
             "source": build_source_info(requested_source, requested_source),
             "priority": {"score": None, "label": "--"},
             "indicators": {},
-            "reason": f"数据不足，暂不触发：{message}",
+            "reason": reason,
             "details": {
-                "warning_type": "insufficient_bars",
+                "warning_type": warning_type,
                 "warning_message": message,
                 "components": {},
+                "health": health_payload,
             },
             "alert_key": None,
         }
     actual_source = str(payload.pop("actual_source") or requested_source)
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    component_results = details.get("components") if isinstance(details.get("components"), dict) else {}
+    details["health"] = build_strategy_health_payload(symbol, strategy, requested_source, component_results)
+    payload["details"] = details
     payload["strategy"] = strategy_record
     payload["source"] = build_source_info(requested_source, actual_source)
     return payload
 
 
 def normalize_query_symbol(raw: str) -> Optional[str]:
-    query = raw.strip().lower()
-    if re.fullmatch(r"(sh|sz)\d{6}", query):
-        return query
-    return None
-
-
-def quote_id_to_symbol(quote_id: str, code: str) -> Optional[str]:
-    if quote_id.startswith("1."):
-        return f"sh{code}"
-    if quote_id.startswith("0."):
-        return f"sz{code}"
-    return None
-
-
-def build_search_item(symbol: str, code: str, name: str, security_type: str) -> Dict[str, Any]:
-    return {
-        "symbol": symbol,
-        "code": code,
-        "name": name,
-        "market": symbol[:2].upper(),
-        "security_type": security_type,
-        "display": f"{symbol.upper()} · {name}",
-    }
-
-
-def score_search_result(query: str, item: Dict[str, Any]) -> int:
-    q = query.strip().lower()
-    symbol = str(item.get("symbol") or "").lower()
-    code = str(item.get("code") or "").lower()
-    name = str(item.get("name") or "").lower()
-    security_type = str(item.get("security_type") or "").lower()
-
-    score = 0
-    if q == code:
-        score += 300
-    elif code.startswith(q):
-        score += 220
-    elif q in code:
-        score += 140
-
-    if q == symbol:
-        score += 280
-    elif symbol.startswith(q):
-        score += 180
-    elif q in symbol:
-        score += 120
-
-    if q == name:
-        score += 260
-    elif name.startswith(q):
-        score += 200
-    elif q in name:
-        score += 150
-
-    if q and q in security_type:
-        score += 30
-    return score
-
-
-def market_field_to_symbol(code: str, market_field: Any) -> Optional[str]:
-    market = str(market_field)
-    if market == "1":
-        return f"sh{code}"
-    if market == "0":
-        return f"sz{code}"
-    return None
-
-
-def fetch_clist_page(fs: str, page: int, fid: str = "f3") -> Tuple[int, List[Dict[str, Any]]]:
-    params = {
-        "pn": page,
-        "pz": CLIST_PAGE_SIZE,
-        "po": 1,
-        "np": 1,
-        "ut": CLIST_UT,
-        "fltt": 2,
-        "invt": 2,
-        "fid": fid,
-        "fs": fs,
-        "fields": "f12,f13,f14",
-    }
-    payload = http_get_json(f"{CLIST_BASE}?{urlencode(params)}")
-    data = payload.get("data") or {}
-    total = int(data.get("total") or 0)
-    rows = data.get("diff") or []
-    return total, rows
-
-
-def build_search_universe() -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for fs, security_type in SEARCH_UNIVERSE_SEGMENTS:
-        total, first_rows = fetch_clist_page(fs, 1)
-        total_pages = max(1, (total + CLIST_PAGE_SIZE - 1) // CLIST_PAGE_SIZE)
-        all_rows = list(first_rows)
-
-        if total_pages > 1:
-            for page in range(2, total_pages + 1):
-                try:
-                    _, rows = fetch_clist_page(fs, page)
-                except Exception:
-                    continue
-                all_rows.extend(rows)
-
-        for row in all_rows:
-            code = str(row.get("f12") or "").strip()
-            symbol = market_field_to_symbol(code, row.get("f13"))
-            if not code or not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            name = str(row.get("f14") or symbol).strip()
-            items.append(build_search_item(symbol, code, name, security_type))
-
-    return items
-
-
-def get_search_universe() -> List[Dict[str, Any]]:
-    now = time.time()
-    with SEARCH_UNIVERSE_LOCK:
-        cached_items = SEARCH_UNIVERSE_CACHE.get("items") or []
-        loaded_at = float(SEARCH_UNIVERSE_CACHE.get("loaded_at") or 0.0)
-        if cached_items and (now - loaded_at) < SEARCH_UNIVERSE_TTL:
-            return list(cached_items)
-
-    items = build_search_universe()
-    with SEARCH_UNIVERSE_LOCK:
-        SEARCH_UNIVERSE_CACHE["items"] = items
-        SEARCH_UNIVERSE_CACHE["loaded_at"] = now
-    return list(items)
-
-
-def fuzzy_search_universe(query: str, limit: int = 12) -> List[Dict[str, Any]]:
-    try:
-        universe = get_search_universe()
-    except Exception:
-        return []
-
-    scored: List[Tuple[int, Dict[str, Any]]] = []
-    for item in universe:
-        score = score_search_result(query, item)
-        if score <= 0:
-            continue
-        scored.append((score, item))
-
-    scored.sort(key=lambda pair: (-pair[0], str(pair[1].get("code") or "")))
-    return [item for _, item in scored[:limit]]
-
-
-def get_prefix_segment_items(fs: str, security_type: str, page_count: int = 4) -> List[Dict[str, Any]]:
-    cache_key = f"{fs}|{security_type}|{page_count}"
-    now = time.time()
-    with PREFIX_SEGMENT_LOCK:
-        cached = PREFIX_SEGMENT_CACHE.get(cache_key)
-        if cached and (now - float(cached.get("loaded_at") or 0.0)) < SEARCH_UNIVERSE_TTL:
-            return list(cached.get("items") or [])
-
-    rows: List[Dict[str, Any]] = []
-    for page in range(1, page_count + 1):
-        try:
-            _, page_rows = fetch_clist_page(fs, page, fid="f12")
-        except Exception:
-            continue
-        rows.extend(page_rows)
-
-    seen: set[str] = set()
-    items: List[Dict[str, Any]] = []
-    for row in rows:
-        code = str(row.get("f12") or "").strip()
-        symbol = market_field_to_symbol(code, row.get("f13"))
-        if not code or not symbol or symbol in seen:
-            continue
-        seen.add(symbol)
-        items.append(build_search_item(symbol, code, str(row.get("f14") or symbol).strip(), security_type))
-
-    items.sort(key=lambda item: str(item.get("code") or ""))
-    with PREFIX_SEGMENT_LOCK:
-        PREFIX_SEGMENT_CACHE[cache_key] = {"items": items, "loaded_at": now}
-    return list(items)
-
-
-def prefix_search_candidates(query: str, limit: int = 12) -> List[Dict[str, Any]]:
-    q = query.strip()
-    if not q.isdigit() or len(q) >= 6:
-        return []
-
-    if q.startswith("6"):
-        fs = "m:1+t:2,m:1+t:23"
-        page_count = 4
-    elif q.startswith("3"):
-        fs = "m:0+t:80"
-        page_count = 4
-    elif q.startswith("0"):
-        fs = "m:0+t:6"
-        page_count = 4
-    elif q.startswith(("1", "5")):
-        return [item for item in fuzzy_search_universe(q, limit=max(limit * 2, limit)) if item["code"].startswith(q)][:limit]
-    else:
-        return []
-
-    items = get_prefix_segment_items(fs, "A股", page_count=page_count)
-    return [item for item in items if item["code"].startswith(q)][:limit]
+    return normalize_query_symbol_value(raw)
 
 
 def warm_search_cache() -> None:
-    try:
-        get_prefix_segment_items("m:1+t:2,m:1+t:23", "A股", page_count=4)
-    except Exception:
-        pass
-    try:
-        get_prefix_segment_items("m:0+t:6", "A股", page_count=4)
-    except Exception:
-        pass
-    try:
-        get_prefix_segment_items("m:0+t:80", "A股", page_count=4)
-    except Exception:
-        pass
-    try:
-        get_search_universe()
-    except Exception:
-        pass
+    search_service.warm_cache()
 
 
 def search_securities(query: str, limit: int = 12) -> List[Dict[str, Any]]:
-    query = query.strip()
-    if not query:
-        return []
-
-    direct_symbol = normalize_query_symbol(query)
-    is_exact_code = bool(re.fullmatch(r"\d{6}", query))
-    is_exact_symbol = bool(direct_symbol)
-    fallback_item = (
-        build_search_item(direct_symbol, direct_symbol[2:], direct_symbol.upper(), "Direct")
-        if direct_symbol
-        else None
-    )
-
-    query_variants = [query]
-    if direct_symbol and direct_symbol[2:] not in query_variants:
-        query_variants.append(direct_symbol[2:])
-
-    seen: set[str] = set()
-    results: List[Dict[str, Any]] = []
-    for query_text in query_variants:
-        params = {
-            "input": query_text,
-            "type": 14,
-            "token": SEARCH_TOKEN,
-        }
-        payload = http_get_json(f"{SEARCH_BASE}?{urlencode(params)}")
-        rows = (payload.get("QuotationCodeTable") or {}).get("Data") or []
-
-        for item in rows:
-            code = str(item.get("Code") or "").strip()
-            quote_id = str(item.get("QuoteID") or "").strip()
-            symbol = quote_id_to_symbol(quote_id, code)
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            name = str(item.get("Name") or symbol)
-            security_type = str(item.get("SecurityTypeName") or item.get("Classify") or "")
-            results.append(build_search_item(symbol, code, name, security_type))
-            if len(results) >= max(limit * 2, limit):
-                break
-        if len(results) >= max(limit * 2, limit):
-            break
-
-    if fallback_item and fallback_item["symbol"] not in seen:
-        results.insert(0, fallback_item)
-
-    if len(results) < limit and query.isdigit() and len(query) < 6:
-        seen_symbols = {str(item.get("symbol") or "").lower() for item in results}
-        for item in prefix_search_candidates(query, limit=max(limit * 2, limit)):
-            symbol = str(item.get("symbol") or "").lower()
-            if not symbol or symbol in seen_symbols:
-                continue
-            seen_symbols.add(symbol)
-            results.append(item)
-            if len(results) >= limit:
-                break
-
-    fuzzy_keywords = ("etf", "lof", "指数", "黄金", "300", "500", "1000", "中证", "沪深", "上证", "深证", "创业板", "科创")
-    should_use_fuzzy = (
-        not (is_exact_code or is_exact_symbol or (query.isdigit() and len(query) < 6))
-        and (len(results) == 0 or any(keyword in query.lower() for keyword in fuzzy_keywords))
-    )
-    if len(results) < limit and should_use_fuzzy:
-        seen_symbols = {str(item.get("symbol") or "").lower() for item in results}
-        for item in fuzzy_search_universe(query, limit=max(limit * 2, limit)):
-            symbol = str(item.get("symbol") or "").lower()
-            if not symbol or symbol in seen_symbols:
-                continue
-            seen_symbols.add(symbol)
-            results.append(item)
-            if len(results) >= max(limit * 2, limit):
-                break
-
-    ranked = sorted(results, key=lambda item: (-score_search_result(query, item), str(item.get("code") or "")))
-    return ranked[:limit]
+    return search_service.search(query, limit=limit)
 
 
 def resolve_symbol(raw: str) -> str:
-    direct = normalize_query_symbol(raw)
-    if direct:
-        return direct
-
-    query = raw.strip()
-    if re.fullmatch(r"\d{6}", query):
-        results = search_securities(query, limit=1)
-        if results:
-            return results[0]["symbol"]
-        if query.startswith(("5", "6", "9")):
-            return f"sh{query}"
-        return f"sz{query}"
-
-    results = search_securities(query, limit=1)
-    if results:
-        return results[0]["symbol"]
-    raise MarketDataError(f"Could not resolve symbol from query: {raw}")
+    return search_service.resolve_symbol(raw)
 
 
 def normalize_import_query(raw: Any) -> str:
-    text = str(raw or "").strip()
-    if not text:
-        return ""
-
-    direct_match = re.search(r"\b(sh|sz)\s*(\d{6})\b", text, flags=re.IGNORECASE)
-    if direct_match:
-        return f"{direct_match.group(1).lower()}{direct_match.group(2)}"
-
-    code_match = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
-    if code_match:
-        return code_match.group(1)
-
-    return text[:64]
+    return normalize_import_query_value(raw)
 
 
 def resolve_watchlist_import_item(raw_item: Dict[str, Any]) -> Dict[str, Any]:
@@ -2758,6 +2607,8 @@ def health() -> Any:
     return jsonify(
         {
             "status": "ok",
+            "app": APP_RUNTIME_ID,
+            "app_label": APP_RUNTIME_LABEL,
             "cache_entries": cache_entries,
             "source_health": SOURCE_HEALTH_TRACKER.snapshot(),
         }
@@ -3255,6 +3106,7 @@ def build_wecom_text_content(payload: Dict[str, Any]) -> str:
     reason_summary = str(payload.get("reason_summary") or reason).strip()
     decision_text = str(payload.get("decision_text") or "").strip()
     action_hint = str(payload.get("action_hint") or "").strip()
+    action_label = str(payload.get("action_label") or "").strip()
     message_title = str(payload.get("message_title") or "").strip()
     timestamp = format_webhook_timestamp(payload.get("timestamp"))
     price = format_webhook_number(payload.get("price"), digits=3)
@@ -3275,6 +3127,8 @@ def build_wecom_text_content(payload: Dict[str, Any]) -> str:
         lines.append(f"Symbol: {' '.join(part for part in [symbol, name] if part)}")
     if strategy:
         lines.append(f"Strategy: {strategy}")
+    if action_label:
+        lines.append(f"Action Level: {action_label}")
     if reason_summary:
         lines.append(f"Summary: {reason_summary}")
     if supporting_reasons:
@@ -3445,6 +3299,14 @@ def alert_signal_for_payload(strategy_signal: Dict[str, Any]) -> str:
     return signal if bool(strategy_signal.get("triggered")) and signal in {"BUY", "SELL"} else "HOLD"
 
 
+def alert_action_for_payload(strategy_signal: Dict[str, Any]) -> str:
+    signal = alert_signal_for_payload(strategy_signal)
+    if signal not in {"BUY", "SELL"}:
+        return ""
+    action = str(strategy_signal.get("action") or "").strip().lower()
+    return action or signal.lower()
+
+
 def alert_day_key_from_value(value: Any) -> str:
     text = str(value or "").strip()
     digits = re.sub(r"\D", "", text)
@@ -3531,15 +3393,22 @@ def run_alert_worker_cycle() -> int:
             continue
 
         next_signal = alert_signal_for_payload(strategy_signal)
+        next_action = alert_action_for_payload(strategy_signal)
+        next_action_label = str(
+            strategy_signal.get("action_label") or action_label_for_value(next_action, next_signal)
+        ).strip()
         day_key = alert_day_key_from_value(strategy_signal.get("timestamp") or quote_payload.get("timestamp"))
         previous_entry = states.get(symbol) or {}
         previous_signal = str(previous_entry.get("signal") or "").strip().upper()
+        previous_action = str(previous_entry.get("action") or "").strip().lower()
         last_alert_day_key = str(previous_entry.get("lastAlertDayKey") or "").strip()
         is_alert_signal = next_signal in {"BUY", "SELL"}
 
         if not previous_signal:
             states[symbol] = {
                 "signal": next_signal,
+                "action": next_action,
+                "actionLabel": next_action_label,
                 "dayKey": day_key,
                 "lastAlertDayKey": day_key if is_alert_signal else "",
                 "updatedAt": iso_now(),
@@ -3548,11 +3417,13 @@ def run_alert_worker_cycle() -> int:
             continue
 
         should_send = False
-        if previous_signal == next_signal:
+        if previous_signal == next_signal and previous_action == next_action:
             if str(previous_entry.get("dayKey") or "") != day_key:
                 states[symbol] = {
                     **previous_entry,
                     "signal": next_signal,
+                    "action": next_action,
+                    "actionLabel": next_action_label,
                     "dayKey": day_key,
                     "updatedAt": iso_now(),
                 }
@@ -3564,6 +3435,8 @@ def run_alert_worker_cycle() -> int:
             states[symbol] = {
                 **previous_entry,
                 "signal": next_signal,
+                "action": next_action,
+                "actionLabel": next_action_label,
                 "dayKey": day_key,
                 "lastAlertDayKey": day_key if is_alert_signal else str(previous_entry.get("lastAlertDayKey") or ""),
                 "updatedAt": iso_now(),

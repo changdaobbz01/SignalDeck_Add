@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260518a') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260519g') }}">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   </head>
   <body>
@@ -25,6 +25,7 @@
             <button id="webhookButton" class="ghost-button brand-webhook-button" type="button">WebHook</button>
           </div>
         </div>
+        <div id="strategyHealthStrip" class="topbar-health-strip" aria-live="polite"></div>
         <div class="topbar-status">
           <div class="status-pill">
             <span class="dot"></span>
@@ -210,11 +211,13 @@
           <div class="signal-box">
             <span class="signal-box-label">买入命中</span>
             <strong id="buyCount">0 / 0</strong>
+            <div id="buyActionSummary" class="signal-action-summary"></div>
             <div id="buyReasons" class="reason-list"></div>
           </div>
           <div class="signal-box">
             <span class="signal-box-label">卖出命中</span>
             <strong id="sellCount">0 / 0</strong>
+            <div id="sellActionSummary" class="signal-action-summary"></div>
             <div id="sellReasons" class="reason-list"></div>
           </div>
         </div>
@@ -394,6 +397,6 @@
       };
     </script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="{{ url_for('static', filename='app.js', v='20260518a') }}"></script>
+    <script src="{{ url_for('static', filename='app.js', v='20260519g') }}"></script>
   </body>
 </html>
