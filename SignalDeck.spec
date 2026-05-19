@@ -1,8 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 import sys
 
 
 block_cipher = None
+
+
+def collect_runtime_binaries():
+    binaries = []
+    search_roots = [
+        Path(sys.base_prefix) / "Library" / "bin",
+        Path(sys.base_prefix) / "DLLs",
+    ]
+    required_names = [
+        "libssl-3-x64.dll",
+        "libcrypto-3-x64.dll",
+        "liblzma.dll",
+        "libbz2.dll",
+        "ffi.dll",
+        "tcl86t.dll",
+        "tk86t.dll",
+    ]
+    seen = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for name in required_names:
+            for candidate in root.glob(name):
+                normalized = candidate.resolve()
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                binaries.append((str(normalized), "."))
+    return binaries
 
 datas = [
     ("templates", "templates"),
@@ -15,7 +45,7 @@ datas = [
 a = Analysis(
     ["desktop_launcher.py"],
     pathex=[],
-    binaries=[],
+    binaries=collect_runtime_binaries(),
     datas=datas,
     hiddenimports=[],
     hookspath=[],

@@ -14,6 +14,11 @@ const FALLBACK_SOURCES = [
     label: "腾讯",
     description: "分钟线与盘口快照稳定性较好，可作为备选信息源。",
   },
+  {
+    value: "xueqiu",
+    label: "雪球",
+    description: "基于录入 Cookie 的雪球行情源，可拉取快照与多周期 K 线。",
+  },
 ];
 
 const DEFAULT_GROUP_NAME = "核心";
@@ -25,7 +30,9 @@ const WATCHLIST_IMPORT_NAME_HEADERS = ["名称", "证券名称", "股票名称",
 
 const AUTO_REFRESH_INTERVAL_MS = 3000;
 const AUTO_REFRESH_CHART_INTERVAL_MS = 9000;
-const AUTO_REFRESH_WATCHLIST_SIGNAL_INTERVAL_MS = 6000;
+const AUTO_REFRESH_WATCHLIST_QUOTES_INTERVAL_MS = 15000;
+const AUTO_REFRESH_MONITORED_SIGNAL_INTERVAL_MS = 6000;
+const AUTO_REFRESH_WATCHLIST_SIGNAL_INTERVAL_MS = 45000;
 
 const state = {
   symbol: window.APP_DEFAULTS.symbol,
@@ -42,6 +49,7 @@ const state = {
   quoteTimer: null,
   strategyTimer: null,
   watchlistQuoteTimer: null,
+  watchlistMonitoredStrategyTimer: null,
   searchTimer: null,
   searchRequestId: 0,
   searchResults: [],
@@ -62,7 +70,9 @@ const state = {
   strategyConfigHelpOpen: false,
   rulesModalOpen: false,
   webhookModalOpen: false,
+  xueqiuCookieModalOpen: false,
   signalDrawerOpen: false,
+  signalDrawerRefreshing: false,
   isRefreshingPulse: false,
   isLoadingChart: false,
   isLoadingQuote: false,
@@ -77,7 +87,6 @@ const state = {
   watchlistStrategyRequestId: 0,
   lastStrategyAlertKey: "",
   lastChartRefreshAt: 0,
-  lastWatchlistSignalRefreshAt: 0,
   watchlistStrategyTimer: null,
   watchlistScrollTimer: null,
   alertRuntimeSyncTimer: null,
@@ -88,6 +97,7 @@ const state = {
   isLoadingAlertRuntime: false,
   isApplyingAlertRuntime: false,
   hasLoadedAlertRuntime: false,
+  xueqiuCookieState: null,
   signalDrawerActionFilters: {
     BUY: "",
     SELL: "",
@@ -107,10 +117,14 @@ const dom = {
   strategySelect: document.getElementById("strategySelect"),
   rulesButton: document.getElementById("rulesButton"),
   webhookButton: document.getElementById("webhookButton"),
+  xueqiuCookieButton: document.getElementById("xueqiuCookieButton"),
   webhookInput: document.getElementById("webhookInput"),
   webhookSaveButton: document.getElementById("webhookSaveButton"),
   webhookTestButton: document.getElementById("webhookTestButton"),
   webhookStatusMessage: document.getElementById("webhookStatusMessage"),
+  xueqiuCookieBackdrop: document.getElementById("xueqiuCookieBackdrop"),
+  xueqiuCookieModal: document.getElementById("xueqiuCookieModal"),
+  xueqiuCookieModalClose: document.getElementById("xueqiuCookieModalClose"),
   strategySignalBadge: document.getElementById("strategySignalBadge"),
   strategySignalMeta: document.getElementById("strategySignalMeta"),
   toastStack: document.getElementById("toastStack"),
@@ -155,6 +169,7 @@ const dom = {
   signalDrawer: document.getElementById("signalDrawer"),
   signalDrawerClose: document.getElementById("signalDrawerClose"),
   signalDrawerStrategyLabel: document.getElementById("signalDrawerStrategyLabel"),
+  signalDrawerLoading: document.getElementById("signalDrawerLoading"),
   timeframeButtons: document.getElementById("timeframeButtons"),
   rulesBackdrop: document.getElementById("rulesBackdrop"),
   rulesModal: document.getElementById("rulesModal"),
@@ -173,6 +188,17 @@ const dom = {
   webhookRuntimeHint: document.getElementById("webhookRuntimeHint"),
   webhookLogCount: document.getElementById("webhookLogCount"),
   webhookLogList: document.getElementById("webhookLogList"),
+  xueqiuCookieStatusValue: document.getElementById("xueqiuCookieStatusValue"),
+  xueqiuCookieUpdatedValue: document.getElementById("xueqiuCookieUpdatedValue"),
+  xueqiuCookieExpiryValue: document.getElementById("xueqiuCookieExpiryValue"),
+  xueqiuCookieKeyCountValue: document.getElementById("xueqiuCookieKeyCountValue"),
+  xueqiuCookieHint: document.getElementById("xueqiuCookieHint"),
+  xueqiuCookieInput: document.getElementById("xueqiuCookieInput"),
+  xueqiuCookieSaveButton: document.getElementById("xueqiuCookieSaveButton"),
+  xueqiuCookieTestButton: document.getElementById("xueqiuCookieTestButton"),
+  xueqiuCookieClearButton: document.getElementById("xueqiuCookieClearButton"),
+  xueqiuCookieMessage: document.getElementById("xueqiuCookieMessage"),
+  xueqiuCookiePanel: document.getElementById("xueqiuCookiePanel"),
   rulesTimeframe: document.getElementById("rulesTimeframe"),
   rulesAdjust: document.getElementById("rulesAdjust"),
   rulesCurrentSource: document.getElementById("rulesCurrentSource"),
@@ -405,6 +431,15 @@ function cacheWatchlistStrategySignal(payload) {
 
 function currentGroupSymbols() {
   return [...new Set(currentGroupItems().map((item) => String(item?.symbol || "").trim().toLowerCase()).filter(Boolean))];
+}
+
+function uniqueNormalizedSymbols(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean))];
+}
+
+function monitoredWatchlistSymbols() {
+  const enabled = state.webhookAlertSymbols instanceof Set ? state.webhookAlertSymbols : new Set();
+  return currentGroupSymbols().filter((symbol) => enabled.has(symbol));
 }
 
 function getWatchlistQuote(item) {
@@ -2556,6 +2591,24 @@ function ensureSignalDrawerStrategyLabel() {
   return node;
 }
 
+function renderSignalDrawerLoading() {
+  if (!dom.signalDrawerLoading) {
+    return;
+  }
+  const loading = Boolean(state.signalDrawerRefreshing);
+  dom.signalDrawerLoading.classList.toggle("hidden", !loading);
+  dom.signalDrawerLoading.textContent = loading ? "正在刷新规则命中列表..." : "";
+}
+
+function focusXueqiuCookiePanel() {
+  if (!dom.xueqiuCookiePanel) {
+    return;
+  }
+  window.setTimeout(() => {
+    dom.xueqiuCookiePanel.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, 80);
+}
+
 function renderStrategyBlueprint(container, components = []) {
   if (!container) return;
   container.innerHTML = "";
@@ -3063,6 +3116,278 @@ function renderWebhookLogList() {
   });
 }
 
+function setXueqiuCookieMessage(message, tone = "neutral") {
+  if (!dom.xueqiuCookieMessage) return;
+  dom.xueqiuCookieMessage.textContent = message || "可直接粘贴整段 Cookie；保存时会自动解析并只保留核心字段。";
+  dom.xueqiuCookieMessage.classList.toggle("success", tone === "success");
+  dom.xueqiuCookieMessage.classList.toggle("warn", tone === "warn");
+  dom.xueqiuCookieMessage.classList.toggle("error", tone === "error");
+}
+
+function getXueqiuCookieHealth(payload = state.xueqiuCookieState) {
+  const configured = Boolean(payload?.configured);
+  const validationOk = Boolean(payload?.validation_ok);
+  const expiresText = String(payload?.expires_at || "").trim();
+  const expiresAt = expiresText ? new Date(expiresText) : null;
+  const expiresMs = expiresAt && !Number.isNaN(expiresAt.getTime()) ? expiresAt.getTime() - Date.now() : null;
+
+  if (!configured) {
+    return {
+      phase: "missing",
+      tone: "danger",
+      statusLabel: "未配置",
+      shortHint: "未录入",
+      detail: "未录入雪球 Cookie，多周期 K 线可能无法加载。",
+      expiresInMs: expiresMs,
+    };
+  }
+  if (!validationOk) {
+    return {
+      phase: "invalid",
+      tone: "warn",
+      statusLabel: "待校验",
+      shortHint: "待校验",
+      detail: "雪球 Cookie 已录入，但还没有通过可用性校验。",
+      expiresInMs: expiresMs,
+    };
+  }
+  if (typeof expiresMs === "number" && expiresMs <= 0) {
+    return {
+      phase: "expired",
+      tone: "danger",
+      statusLabel: "已过期",
+      shortHint: "已过期",
+      detail: "雪球 Cookie 已过期，请重新录入最新 Cookie。",
+      expiresInMs: expiresMs,
+    };
+  }
+  if (typeof expiresMs === "number" && expiresMs <= 72 * 60 * 60 * 1000) {
+    return {
+      phase: "expiring",
+      tone: "warn",
+      statusLabel: "即将过期",
+      shortHint: "即将过期",
+      detail: `雪球 Cookie ${describeExpiryDistance(expiresMs)}后过期，建议提前更新。`,
+      expiresInMs: expiresMs,
+    };
+  }
+  return {
+    phase: "healthy",
+    tone: "good",
+    statusLabel: "已配置",
+    shortHint: typeof expiresMs === "number" ? `${describeExpiryDistance(expiresMs)}后过期` : "可用",
+    detail: typeof expiresMs === "number" ? `雪球 Cookie 状态正常，${describeExpiryDistance(expiresMs)}后过期。` : "雪球 Cookie 状态正常。",
+    expiresInMs: expiresMs,
+  };
+}
+
+function describeExpiryDistance(msRemaining) {
+  const ms = Number(msRemaining);
+  if (!Number.isFinite(ms)) {
+    return "";
+  }
+  const totalMinutes = Math.max(0, Math.round(ms / 60000));
+  const totalHours = Math.max(0, Math.round(ms / 3600000));
+  const totalDays = Math.max(0, Math.round(ms / 86400000));
+  if (totalDays >= 2) {
+    return `${totalDays} 天`;
+  }
+  if (totalHours >= 1) {
+    return `${totalHours} 小时`;
+  }
+  return `${Math.max(totalMinutes, 1)} 分钟`;
+}
+
+function maybeWarnXueqiuSourceSelection() {
+  if (state.source !== "xueqiu") {
+    return;
+  }
+  const health = getXueqiuCookieHealth();
+  if (health.phase === "healthy") {
+    return;
+  }
+  const title =
+    health.phase === "missing"
+      ? "雪球 Cookie 未配置"
+      : health.phase === "expired"
+        ? "雪球 Cookie 已过期"
+        : "雪球 Cookie 需要关注";
+  showToast({
+    tone: health.phase === "expired" || health.phase === "missing" ? "sell" : "hold",
+    title,
+    body: health.detail,
+    meta: "可通过顶部的 雪球 Cookie 按钮录入或更新。",
+  });
+}
+
+function renderXueqiuCookiePanel(options = {}) {
+  const { syncInput = false } = options;
+  const payload = state.xueqiuCookieState && typeof state.xueqiuCookieState === "object" ? state.xueqiuCookieState : null;
+  if (syncInput && dom.xueqiuCookieInput) {
+    dom.xueqiuCookieInput.value = "";
+  }
+  if (!dom.xueqiuCookieStatusValue || !dom.xueqiuCookieUpdatedValue || !dom.xueqiuCookieExpiryValue || !dom.xueqiuCookieKeyCountValue) {
+    return;
+  }
+  const statusCard = dom.xueqiuCookieStatusValue.closest(".webhook-runtime-card");
+  const updatedCard = dom.xueqiuCookieUpdatedValue.closest(".webhook-runtime-card");
+  const expiryCard = dom.xueqiuCookieExpiryValue.closest(".webhook-runtime-card");
+  const countCard = dom.xueqiuCookieKeyCountValue.closest(".webhook-runtime-card");
+  const configured = Boolean(payload?.configured);
+  const validationOk = Boolean(payload?.validation_ok);
+  const keyCount = Number(payload?.cookie_key_count || 0);
+  const lastError = String(payload?.last_error || "").trim();
+  const health = getXueqiuCookieHealth(payload);
+
+  dom.xueqiuCookieStatusValue.textContent = health.statusLabel;
+  dom.xueqiuCookieUpdatedValue.textContent = formatWebhookLogTime(payload?.updated_at);
+  dom.xueqiuCookieExpiryValue.textContent = formatWebhookLogTime(payload?.expires_at);
+  dom.xueqiuCookieKeyCountValue.textContent = `${keyCount}`;
+  if (dom.xueqiuCookieHint) {
+    const parts = [];
+    if (payload?.summary?.user_id) {
+      parts.push(`用户 ${payload.summary.user_id}`);
+    }
+    if (Array.isArray(payload?.cookie_keys) && payload.cookie_keys.length > 0) {
+      parts.push(`核心字段：${payload.cookie_keys.join(", ")}`);
+    }
+    if (health.shortHint) {
+      parts.push(health.shortHint);
+    }
+    if (lastError) {
+      parts.push(`最近错误：${lastError}`);
+    }
+    dom.xueqiuCookieHint.textContent = parts.join(" | ") || "尚未录入雪球 Cookie。";
+    dom.xueqiuCookieHint.classList.toggle("error", Boolean(lastError) && !validationOk);
+    dom.xueqiuCookieHint.classList.toggle("warn", !lastError && health.tone === "warn");
+  }
+  setWebhookRuntimeCardTone(
+    statusCard,
+    health.tone === "good" ? "is-good" : health.tone === "warn" ? "is-warn" : "is-danger"
+  );
+  setWebhookRuntimeCardTone(updatedCard, payload?.updated_at ? "is-good" : "is-warn");
+  setWebhookRuntimeCardTone(
+    expiryCard,
+    !payload?.expires_at ? "is-warn" : health.tone === "danger" ? "is-danger" : health.tone === "warn" ? "is-warn" : "is-good"
+  );
+  setWebhookRuntimeCardTone(countCard, keyCount >= 6 ? "is-good" : keyCount > 0 ? "is-warn" : "is-danger");
+  if (dom.xueqiuCookieMessage && !dom.xueqiuCookieMessage.textContent.trim()) {
+    setXueqiuCookieMessage("");
+  }
+}
+
+async function loadXueqiuCookieState() {
+  const response = await fetch("/api/xueqiu-cookie");
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || "Load Xueqiu cookie state failed");
+  }
+  state.xueqiuCookieState = payload;
+  renderSourcePanels();
+  return payload;
+}
+
+async function saveXueqiuCookieState() {
+  const rawCookie = dom.xueqiuCookieInput?.value.trim() || "";
+  if (!rawCookie) {
+    setXueqiuCookieMessage("请先粘贴完整 Cookie 字符串。", "error");
+    return;
+  }
+  if (dom.xueqiuCookieSaveButton) {
+    dom.xueqiuCookieSaveButton.disabled = true;
+  }
+  setXueqiuCookieMessage("正在解析并验证雪球 Cookie...", "neutral");
+  try {
+    const response = await fetch("/api/xueqiu-cookie", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ cookie: rawCookie }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Save Xueqiu cookie failed");
+    }
+    state.xueqiuCookieState = payload;
+    renderXueqiuCookiePanel({ syncInput: true });
+    renderSourcePanels();
+    setXueqiuCookieMessage(`雪球 Cookie 已保存，核心字段 ${payload.cookie_key_count || 0} 个。`, "success");
+    setRefreshStatus("雪球 Cookie 已保存");
+  } catch (error) {
+    console.error(error);
+    setXueqiuCookieMessage(error.message || "Save Xueqiu cookie failed", "error");
+  } finally {
+    if (dom.xueqiuCookieSaveButton) {
+      dom.xueqiuCookieSaveButton.disabled = false;
+    }
+  }
+}
+
+async function validateXueqiuCookieState() {
+  const rawCookie = dom.xueqiuCookieInput?.value.trim() || "";
+  if (dom.xueqiuCookieTestButton) {
+    dom.xueqiuCookieTestButton.disabled = true;
+  }
+  setXueqiuCookieMessage("正在校验雪球 Cookie...", "neutral");
+  try {
+    const response = await fetch("/api/xueqiu-cookie/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(rawCookie ? { cookie: rawCookie } : {}),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.error || "Validate Xueqiu cookie failed");
+    }
+    if (state.xueqiuCookieState && typeof state.xueqiuCookieState === "object" && !rawCookie) {
+      state.xueqiuCookieState = {
+        ...state.xueqiuCookieState,
+        validation_ok: true,
+        validated_at: payload.validated_at,
+        last_error: "",
+        summary: payload.summary || state.xueqiuCookieState.summary || {},
+        expires_at: payload.summary?.expires_at || state.xueqiuCookieState.expires_at || "",
+      };
+    }
+    renderXueqiuCookiePanel({ syncInput: false });
+    renderSourcePanels();
+    setXueqiuCookieMessage(`雪球 Cookie 校验通过，60m K 线可用 ${payload.summary?.kline_count || 0} 条。`, "success");
+  } catch (error) {
+    console.error(error);
+    setXueqiuCookieMessage(error.message || "Validate Xueqiu cookie failed", "error");
+  } finally {
+    if (dom.xueqiuCookieTestButton) {
+      dom.xueqiuCookieTestButton.disabled = false;
+    }
+  }
+}
+
+async function clearXueqiuCookieState() {
+  if (dom.xueqiuCookieClearButton) {
+    dom.xueqiuCookieClearButton.disabled = true;
+  }
+  try {
+    const response = await fetch("/api/xueqiu-cookie", { method: "DELETE" });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Clear Xueqiu cookie failed");
+    }
+    state.xueqiuCookieState = payload;
+    if (dom.xueqiuCookieInput) {
+      dom.xueqiuCookieInput.value = "";
+    }
+    renderXueqiuCookiePanel({ syncInput: false });
+    renderSourcePanels();
+    setXueqiuCookieMessage("雪球 Cookie 已清空。", "neutral");
+  } catch (error) {
+    console.error(error);
+    setXueqiuCookieMessage(error.message || "Clear Xueqiu cookie failed", "error");
+  } finally {
+    if (dom.xueqiuCookieClearButton) {
+      dom.xueqiuCookieClearButton.disabled = false;
+    }
+  }
+}
+
 function renderWebhookPanel(options = {}) {
   const { syncInput = false } = options;
   if (syncInput && dom.webhookInput) {
@@ -3144,6 +3469,9 @@ function openWebhookModal() {
   if (state.rulesModalOpen) {
     closeRulesModal();
   }
+  if (state.xueqiuCookieModalOpen) {
+    closeXueqiuCookieModal();
+  }
   setSignalDrawerOpen(false);
   state.webhookModalOpen = true;
   renderWebhookPanel({ syncInput: true });
@@ -3167,6 +3495,49 @@ function closeWebhookModal() {
   dom.webhookBackdrop.classList.add("hidden");
   dom.webhookModal.classList.add("hidden");
   dom.webhookModal.setAttribute("aria-hidden", "true");
+}
+
+function openXueqiuCookieModal() {
+  if (state.rulesModalOpen) {
+    closeRulesModal();
+  }
+  if (state.webhookModalOpen) {
+    closeWebhookModal();
+  }
+  setSignalDrawerOpen(false);
+  state.xueqiuCookieModalOpen = true;
+  if (dom.xueqiuCookieBackdrop) {
+    dom.xueqiuCookieBackdrop.classList.remove("hidden");
+  }
+  if (dom.xueqiuCookieModal) {
+    dom.xueqiuCookieModal.classList.remove("hidden");
+    dom.xueqiuCookieModal.setAttribute("aria-hidden", "false");
+  }
+  renderXueqiuCookiePanel({ syncInput: false });
+  setXueqiuCookieMessage("");
+  loadXueqiuCookieState()
+    .then(() => {
+      if (state.xueqiuCookieModalOpen) {
+        renderXueqiuCookiePanel({ syncInput: false });
+        focusXueqiuCookiePanel();
+      }
+    })
+    .catch((error) => {
+      console.error(error);
+      setXueqiuCookieMessage(error.message || "Load Xueqiu cookie state failed", "error");
+    });
+  focusXueqiuCookiePanel();
+}
+
+function closeXueqiuCookieModal() {
+  state.xueqiuCookieModalOpen = false;
+  if (dom.xueqiuCookieBackdrop) {
+    dom.xueqiuCookieBackdrop.classList.add("hidden");
+  }
+  if (dom.xueqiuCookieModal) {
+    dom.xueqiuCookieModal.classList.add("hidden");
+    dom.xueqiuCookieModal.setAttribute("aria-hidden", "true");
+  }
 }
 
 function buildWebhookPayload(row, signal) {
@@ -3352,6 +3723,7 @@ function renderSignalDrawerFromWatchlist() {
   const strategyOff = normalizeStrategyValue(state.strategy) === "none";
   const strategyMeta = getStrategyMeta(state.strategy);
   const strategyLabelNode = ensureSignalDrawerStrategyLabel();
+  renderSignalDrawerLoading();
 
   if (strategyLabelNode) {
     strategyLabelNode.textContent = `当前规则：${strategyMeta?.label || state.strategy || "--"}`;
@@ -3404,9 +3776,14 @@ function renderSignalDrawerFromWatchlist() {
 
 async function refreshSignalDrawerData() {
   if (!state.signalDrawerOpen) return;
+  state.signalDrawerRefreshing = true;
   renderSignalDrawerFromWatchlist();
-  await runDashboardPulse({ silent: true, forceWatchlistSignals: true, announce: false });
-  renderSignalDrawerFromWatchlist();
+  try {
+    await runDashboardPulse({ silent: true, forceWatchlistSignals: true, announce: false });
+  } finally {
+    state.signalDrawerRefreshing = false;
+    renderSignalDrawerFromWatchlist();
+  }
 }
 
 function renderWarnings(warnings) {
@@ -5112,9 +5489,7 @@ async function runDashboardPulse(options = {}) {
   const requestId = ++state.pulseRequestId;
   const now = Date.now();
   const includeChart = shouldRefreshChart(now, forceChart);
-  const includeWatchlistSignals = shouldRefreshWatchlistSignals(now, forceWatchlistSignals);
   const targetSymbol = state.symbol;
-  const watchlistSymbols = currentGroupSymbols();
 
   state.isRefreshingPulse = true;
   try {
@@ -5124,15 +5499,15 @@ async function runDashboardPulse(options = {}) {
       bars: 260,
       source: state.source,
       strategy: state.strategy,
-      watchlistSymbols,
+      watchlistSymbols: [],
       includeChart,
-      includeWatchlistSignals,
+      includeWatchlistSignals: false,
     });
     if (requestId !== state.pulseRequestId || targetSymbol !== state.symbol || payload.symbol !== state.symbol) {
       return;
     }
 
-    applyDashboardPulsePayload(payload, { includeChart, includeWatchlistSignals, announce, now });
+    applyDashboardPulsePayload(payload, { includeChart, includeWatchlistSignals: false, announce, now });
 
     const chartError = includeChart ? String(payload?.errors?.chart || "").trim() : "";
     if (chartError && !payload.chart && !silent) {
@@ -5142,6 +5517,13 @@ async function runDashboardPulse(options = {}) {
 
     if (!silent) {
       setRefreshStatus(`自动刷新中 · ${new Date().toLocaleTimeString("zh-CN")}`);
+    }
+
+    if (forceWatchlistSignals) {
+      await Promise.all([
+        fetchWatchlistQuotes({ silent: true }).catch((error) => console.error(error)),
+        fetchWatchlistStrategySignals({ silent: true }).catch((error) => console.error(error)),
+      ]);
     }
   } catch (error) {
     console.error(error);
@@ -5156,8 +5538,8 @@ async function runDashboardPulse(options = {}) {
 }
 
 async function fetchWatchlistQuotes(options = {}) {
-  const { silent = true } = options;
-  const symbols = currentGroupSymbols();
+  const { silent = true, symbolsOverride = null } = options;
+  const symbols = uniqueNormalizedSymbols(symbolsOverride || currentGroupSymbols());
   if (symbols.length === 0) {
     return;
   }
@@ -5205,23 +5587,27 @@ async function fetchWatchlistQuotes(options = {}) {
 }
 
 async function fetchWatchlistStrategySignals(options = {}) {
-  const { silent = true } = options;
-  const symbols = currentGroupSymbols();
+  const { silent = true, symbolsOverride = null, clearWhenEmpty = true } = options;
+  const symbols = uniqueNormalizedSymbols(symbolsOverride || currentGroupSymbols());
   if (normalizeStrategyValue(state.strategy) === "none") {
-    state.watchlistStrategySignals = {};
-    renderWatchlist();
-    processWebhookAlerts();
-    if (state.signalDrawerOpen) {
-      renderSignalDrawerFromWatchlist();
+    if (clearWhenEmpty) {
+      state.watchlistStrategySignals = {};
+      renderWatchlist();
+      processWebhookAlerts();
+      if (state.signalDrawerOpen) {
+        renderSignalDrawerFromWatchlist();
+      }
     }
     return;
   }
   if (symbols.length === 0) {
-    state.watchlistStrategySignals = {};
-    renderWatchlist();
-    processWebhookAlerts();
-    if (state.signalDrawerOpen) {
-      renderSignalDrawerFromWatchlist();
+    if (clearWhenEmpty) {
+      state.watchlistStrategySignals = {};
+      renderWatchlist();
+      processWebhookAlerts();
+      if (state.signalDrawerOpen) {
+        renderSignalDrawerFromWatchlist();
+      }
     }
     return;
   }
@@ -5231,6 +5617,9 @@ async function fetchWatchlistStrategySignals(options = {}) {
 
   const requestId = ++state.watchlistStrategyRequestId;
   state.isLoadingWatchlistStrategySignals = true;
+  if (state.signalDrawerOpen) {
+    renderSignalDrawerFromWatchlist();
+  }
 
   try {
     const payload = await requestDashboardPulse({
@@ -5264,6 +5653,9 @@ async function fetchWatchlistStrategySignals(options = {}) {
   } finally {
     if (requestId === state.watchlistStrategyRequestId) {
       state.isLoadingWatchlistStrategySignals = false;
+      if (state.signalDrawerOpen) {
+        renderSignalDrawerFromWatchlist();
+      }
     }
   }
 }
@@ -5337,9 +5729,9 @@ async function loadMarket(symbol, options = {}) {
       bars: 260,
       source: state.source,
       strategy: state.strategy,
-      watchlistSymbols: currentGroupSymbols(),
+      watchlistSymbols: [],
       includeChart: true,
-      includeWatchlistSignals: true,
+      includeWatchlistSignals: false,
     });
     if (requestId !== state.marketRequestId) {
       return;
@@ -5347,7 +5739,7 @@ async function loadMarket(symbol, options = {}) {
 
     applyDashboardPulsePayload(payload, {
       includeChart: true,
-      includeWatchlistSignals: true,
+      includeWatchlistSignals: false,
       announce: !background,
       now: Date.now(),
     });
@@ -5358,6 +5750,12 @@ async function loadMarket(symbol, options = {}) {
     } else {
       setRefreshStatus(`自动刷新中 · ${new Date().toLocaleTimeString("zh-CN")}`);
     }
+    fetchWatchlistQuotes({ silent: true }).catch((error) => console.error(error));
+    fetchWatchlistStrategySignals({
+      silent: true,
+      symbolsOverride: monitoredWatchlistSymbols(),
+      clearWhenEmpty: false,
+    }).catch((error) => console.error(error));
   } catch (error) {
     console.error(error);
     if (requestId !== state.marketRequestId) {
@@ -5410,16 +5808,39 @@ function startAutoRefresh(options = {}) {
   if (state.watchlistStrategyTimer) {
     clearInterval(state.watchlistStrategyTimer);
   }
+  if (state.watchlistMonitoredStrategyTimer) {
+    clearInterval(state.watchlistMonitoredStrategyTimer);
+  }
   state.quoteTimer = null;
   state.strategyTimer = null;
   state.watchlistQuoteTimer = null;
   state.watchlistStrategyTimer = null;
+  state.watchlistMonitoredStrategyTimer = null;
   state.refreshTimer = window.setInterval(() => {
     if (!state.symbol) return;
     runDashboardPulse({ silent: true, announce: true });
   }, AUTO_REFRESH_INTERVAL_MS);
+  state.watchlistQuoteTimer = window.setInterval(() => {
+    fetchWatchlistQuotes({ silent: true }).catch((error) => console.error(error));
+  }, AUTO_REFRESH_WATCHLIST_QUOTES_INTERVAL_MS);
+  state.watchlistStrategyTimer = window.setInterval(() => {
+    fetchWatchlistStrategySignals({ silent: true }).catch((error) => console.error(error));
+  }, AUTO_REFRESH_WATCHLIST_SIGNAL_INTERVAL_MS);
+  state.watchlistMonitoredStrategyTimer = window.setInterval(() => {
+    fetchWatchlistStrategySignals({
+      silent: true,
+      symbolsOverride: monitoredWatchlistSymbols(),
+      clearWhenEmpty: false,
+    }).catch((error) => console.error(error));
+  }, AUTO_REFRESH_MONITORED_SIGNAL_INTERVAL_MS);
   if (immediate) {
-    runDashboardPulse({ silent: true, forceWatchlistSignals: true, announce: false });
+    runDashboardPulse({ silent: true, announce: false });
+    fetchWatchlistQuotes({ silent: true }).catch((error) => console.error(error));
+    fetchWatchlistStrategySignals({
+      silent: true,
+      symbolsOverride: monitoredWatchlistSymbols(),
+      clearWhenEmpty: false,
+    }).catch((error) => console.error(error));
   }
 }
 
@@ -5546,6 +5967,7 @@ function bindEvents() {
     state.source = dom.sourceSelect.value;
     saveSourcePreference();
     renderSourcePanels();
+    maybeWarnXueqiuSourceSelection();
     loadMarket(state.symbol);
   });
 
@@ -5637,10 +6059,19 @@ function renderSourcePanels(sourcePayload) {
 
   if (source.requested === source.actual) {
     dom.metricSourceMeta.textContent = `请求: ${source.requested_label}`;
-    return;
+  } else {
+    dom.metricSourceMeta.textContent = `请求: ${source.requested_label} -> ${source.actual_label}`;
   }
 
-  dom.metricSourceMeta.textContent = `请求: ${source.requested_label} -> ${source.actual_label}`;
+  const effectiveSource = String(source.actual || source.requested || state.source).trim().toLowerCase();
+  if (effectiveSource === "xueqiu") {
+    const health = getXueqiuCookieHealth();
+    const suffix = health.phase === "healthy" ? `Cookie ${health.shortHint}` : `Cookie ${health.statusLabel}`;
+    dom.metricSourceMeta.textContent = `${dom.metricSourceMeta.textContent} | ${suffix}`;
+    dom.metricSourceMeta.title = health.detail;
+    return;
+  }
+  dom.metricSourceMeta.removeAttribute("title");
 }
 
 function renderSummary(payload) {
@@ -6088,14 +6519,21 @@ function closeRulesModal() {
 }
 
 function setSignalDrawerOpen(nextOpen) {
+  const wasOpen = Boolean(state.signalDrawerOpen);
   state.signalDrawerOpen = Boolean(nextOpen);
   dom.signalDrawer.classList.toggle("open", state.signalDrawerOpen);
   dom.signalDrawerBackdrop.classList.toggle("hidden", !state.signalDrawerOpen);
   dom.signalDrawer.setAttribute("aria-hidden", state.signalDrawerOpen ? "false" : "true");
   dom.signalDrawerToggle.setAttribute("aria-expanded", state.signalDrawerOpen ? "true" : "false");
-  if (state.signalDrawerOpen) {
+  if (!state.signalDrawerOpen) {
+    state.signalDrawerRefreshing = false;
+    renderSignalDrawerFromWatchlist();
+    return;
+  }
+  if (!wasOpen) {
     refreshSignalDrawerData().catch((error) => {
       console.error(error);
+      state.signalDrawerRefreshing = false;
       renderSignalDrawerFromWatchlist();
     });
   }
@@ -6388,6 +6826,15 @@ function bindEvents() {
   if (dom.webhookTestButton) {
     dom.webhookTestButton.addEventListener("click", testWebhookConnection);
   }
+  if (dom.xueqiuCookieSaveButton) {
+    dom.xueqiuCookieSaveButton.addEventListener("click", saveXueqiuCookieState);
+  }
+  if (dom.xueqiuCookieTestButton) {
+    dom.xueqiuCookieTestButton.addEventListener("click", validateXueqiuCookieState);
+  }
+  if (dom.xueqiuCookieClearButton) {
+    dom.xueqiuCookieClearButton.addEventListener("click", clearXueqiuCookieState);
+  }
 
   if (dom.watchlistSearchInput) {
     dom.watchlistSearchInput.addEventListener("input", () => {
@@ -6407,6 +6854,10 @@ function bindEvents() {
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (state.xueqiuCookieModalOpen) {
+      closeXueqiuCookieModal();
+      return;
+    }
     if (state.webhookModalOpen) {
       closeWebhookModal();
       return;
@@ -6503,7 +6954,6 @@ function bindEvents() {
       openWebhookModal();
     });
   }
-
   dom.signalDrawerToggle.addEventListener("click", () => {
     setSignalDrawerOpen(!state.signalDrawerOpen);
   });
@@ -6860,9 +7310,30 @@ async function sendWebhookAlert(payload, options = {}) {
 
 async function init() {
   bindEvents();
+  if (dom.xueqiuCookieButton) {
+    dom.xueqiuCookieButton.onclick = () => {
+      openXueqiuCookieModal();
+    };
+  }
+  if (dom.xueqiuCookieModalClose) {
+    dom.xueqiuCookieModalClose.onclick = () => {
+      closeXueqiuCookieModal();
+    };
+  }
+  if (dom.xueqiuCookieBackdrop) {
+    dom.xueqiuCookieBackdrop.onclick = () => {
+      closeXueqiuCookieModal();
+    };
+  }
   await loadAlertRuntimeState();
+  try {
+    await loadXueqiuCookieState();
+  } catch (error) {
+    console.error(error);
+  }
   renderWatchlist();
   renderWebhookPanel({ syncInput: true });
+  renderXueqiuCookiePanel({ syncInput: true });
   setActiveTimeframeButton();
   setSignalDrawerOpen(false);
   renderSourcePanels();

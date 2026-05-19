@@ -1,9 +1,37 @@
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
 Set-Location $PSScriptRoot
 
+function Resolve-BasePython {
+  if (Test-Path ".venv-package\\Scripts\\python.exe") {
+    return (Join-Path $PSScriptRoot ".venv-package\\Scripts\\python.exe")
+  }
+
+  try {
+    $result = (& py -3 -c "import sys; print(sys.executable)").Trim()
+    if ($result) {
+      return $result
+    }
+  }
+  catch {
+  }
+
+  try {
+    $result = (& python -c "import sys; print(sys.executable)").Trim()
+    if ($result) {
+      return $result
+    }
+  }
+  catch {
+  }
+
+  throw "Python 3 was not found. Install Python 3 or ensure 'py -3' or 'python' is available in PATH."
+}
+
 if (-not (Test-Path ".venv-package\\Scripts\\python.exe")) {
-  & E:\anaconda\python.exe -m venv .venv-package
+  $basePython = Resolve-BasePython
+  & $basePython -m venv .venv-package
 }
 
 $python = Join-Path $PSScriptRoot ".venv-package\\Scripts\\python.exe"

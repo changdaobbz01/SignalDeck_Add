@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260519g') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='20260519l') }}">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   </head>
   <body>
@@ -23,6 +23,7 @@
             </button>
             <button id="rulesButton" class="ghost-button brand-rules-button" type="button">规则说明</button>
             <button id="webhookButton" class="ghost-button brand-webhook-button" type="button">WebHook</button>
+            <button id="xueqiuCookieButton" class="ghost-button brand-webhook-button" type="button">雪球 Cookie</button>
           </div>
         </div>
         <div id="strategyHealthStrip" class="topbar-health-strip" aria-live="polite"></div>
@@ -204,6 +205,7 @@
             <p class="eyebrow">Signal Drawer</p>
             <h2>规则命中</h2>
             <p id="signalDrawerStrategyLabel" class="signal-drawer-current-rule">当前规则：--</p>
+            <p id="signalDrawerLoading" class="signal-drawer-loading hidden">正在刷新规则命中列表...</p>
           </div>
           <button id="signalDrawerClose" class="drawer-close" type="button" aria-label="关闭规则抽屉">×</button>
         </div>
@@ -386,6 +388,49 @@
           <div id="webhookLogList" class="webhook-log-list"></div>
         </section>
       </section>
+
+      <div id="xueqiuCookieBackdrop" class="modal-backdrop hidden"></div>
+      <section id="xueqiuCookieModal" class="rules-modal webhook-modal hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="xueqiuCookieModalTitle">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Xueqiu Cookie</p>
+            <h2 id="xueqiuCookieModalTitle">雪球 Cookie</h2>
+          </div>
+          <button id="xueqiuCookieModalClose" class="modal-close" type="button" aria-label="关闭雪球 Cookie">×</button>
+        </div>
+        <section id="xueqiuCookiePanel" class="webhook-panel xueqiu-cookie-panel">
+          <div class="webhook-copy">
+            <h3>雪球 Cookie</h3>
+            <p>直接粘贴整段浏览器 Cookie 即可，系统会自动解析并只保留雪球行情真正需要的核心字段。</p>
+          </div>
+          <div class="webhook-runtime-grid xueqiu-runtime-grid">
+            <article class="webhook-runtime-card">
+              <span>配置状态</span>
+              <strong id="xueqiuCookieStatusValue">--</strong>
+            </article>
+            <article class="webhook-runtime-card">
+              <span>更新时间</span>
+              <strong id="xueqiuCookieUpdatedValue">--</strong>
+            </article>
+            <article class="webhook-runtime-card">
+              <span>过期时间</span>
+              <strong id="xueqiuCookieExpiryValue">--</strong>
+            </article>
+            <article class="webhook-runtime-card">
+              <span>核心字段</span>
+              <strong id="xueqiuCookieKeyCountValue">0</strong>
+            </article>
+          </div>
+          <p id="xueqiuCookieHint" class="webhook-runtime-hint">--</p>
+          <textarea id="xueqiuCookieInput" class="strategy-config-input xueqiu-cookie-input" spellcheck="false" placeholder="直接粘贴整段 Cookie 字符串，例如 cookiesu=...; xq_a_token=...; xq_id_token=..."></textarea>
+          <div class="webhook-modal-row xueqiu-cookie-actions">
+            <button id="xueqiuCookieSaveButton" class="webhook-save-button" type="button">保存</button>
+            <button id="xueqiuCookieTestButton" class="ghost-button webhook-test-button" type="button">校验</button>
+            <button id="xueqiuCookieClearButton" class="ghost-button webhook-test-button" type="button">清空</button>
+          </div>
+          <p id="xueqiuCookieMessage" class="webhook-status-message">--</p>
+        </section>
+      </section>
     </div>
 
     <script>
@@ -397,6 +442,6 @@
       };
     </script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-    <script src="{{ url_for('static', filename='app.js', v='20260519g') }}"></script>
+    <script src="{{ url_for('static', filename='app.js', v='20260519l') }}"></script>
   </body>
 </html>

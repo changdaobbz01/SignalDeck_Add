@@ -13,7 +13,7 @@ from market_signal_tool import MarketDataError, http_get_json
 
 def normalize_query_symbol(raw: str) -> Optional[str]:
     query = str(raw or "").strip().lower()
-    if re.fullmatch(r"(sh|sz)\d{6}", query):
+    if re.fullmatch(r"(sh|sz|bj)\d{6}", query):
         return query
     return None
 
@@ -23,7 +23,7 @@ def normalize_import_query(raw: Any) -> str:
     if not text:
         return ""
 
-    direct_match = re.search(r"\b(sh|sz)\s*(\d{6})\b", text, flags=re.IGNORECASE)
+    direct_match = re.search(r"\b(sh|sz|bj)\s*(\d{6})\b", text, flags=re.IGNORECASE)
     if direct_match:
         return f"{direct_match.group(1).lower()}{direct_match.group(2)}"
 
@@ -445,6 +445,8 @@ class SecuritySearchService:
 
         query = str(raw or "").strip()
         if re.fullmatch(r"\d{6}", query):
+            if query.startswith(("4", "8")):
+                return f"bj{query}"
             results = self.search(query, limit=1)
             if results:
                 return str(results[0]["symbol"])

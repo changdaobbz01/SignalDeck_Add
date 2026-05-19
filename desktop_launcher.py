@@ -123,7 +123,16 @@ def run_server_process() -> None:
     try:
         from app import DEFAULT_HOST, DEFAULT_PORT, app, warm_search_cache
 
-        warm_search_cache()
+        base_url = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
+        try:
+            existing = fetch_health_once(base_url, timeout_seconds=HEALTH_PROBE_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing:
+            write_launcher_log(f"Server launch skipped because an existing {APP_RUNTIME_ID} service is already running at {base_url}")
+            return
+
+        threading.Thread(target=warm_search_cache, name="signaldeck-search-warm", daemon=True).start()
         try:
             from waitress import serve
         except ImportError:

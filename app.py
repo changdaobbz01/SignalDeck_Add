@@ -30,8 +30,12 @@ from market_signal_tool import (
     load_config,
     macd,
     normalize_source_name,
+    parse_cookie_header_string,
+    probe_xueqiu_cookie_map,
     sma,
     source_label,
+    select_xueqiu_core_cookies,
+    xueqiu_cookie_summary,
 )
 from security_search import (
     SecuritySearchService,
@@ -87,6 +91,9 @@ STRATEGY_CATALOG_PATH = os.path.join(RESOURCE_DIR, "strategy_presets.json")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.example.json")
 STRATEGY_OVERRIDES_PATH = os.path.join(DATA_DIR, "strategy_overrides.json")
 ALERT_RUNTIME_PATH = os.path.join(DATA_DIR, "alert_runtime.json")
+XUEQIU_COOKIE_PATH = os.path.join(DATA_DIR, "xueqiu_cookies.json")
+os.environ["SIGNAL_DECK_DATA_DIR"] = DATA_DIR
+os.environ["SIGNAL_DECK_XUEQIU_COOKIE_PATH"] = XUEQIU_COOKIE_PATH
 ensure_runtime_file(CONFIG_PATH, CONFIG_TEMPLATE_PATH, "{}\n")
 ensure_runtime_file(STRATEGY_OVERRIDES_PATH, "", '{"strategies":{}}\n')
 ensure_runtime_file(
@@ -94,7 +101,9 @@ ensure_runtime_file(
     "",
     '{"watchlist":{"items":[]},"strategy":"liu_core_v2","source":"auto","webhook":{"url":"","enabled_symbols":[],"alert_states":{},"logs":[]}}\n',
 )
+ensure_runtime_file(XUEQIU_COOKIE_PATH, "", '{"cookies":{},"updated_at":"","validation_ok":false,"last_error":"未配置"}\n')
 STRATEGY_CONFIG_LOCK = Lock()
+XUEQIU_COOKIE_LOCK = Lock()
 RESPONSE_CACHE: Dict[str, Dict[str, Any]] = {}
 RESPONSE_CACHE_LOCK = Lock()
 RESPONSE_CACHE_MAX_ITEMS = 1024
@@ -109,6 +118,7 @@ ALERT_WORKER_INTERVAL_SECONDS = 8.0
 ALERT_RUNTIME_LOCK = Lock()
 ALERT_WORKER_STATE_LOCK = Lock()
 ALERT_WORKER_STOP = Event()
+ALERT_WORKER_WAKE = Event()
 ALERT_WORKER_THREAD: Optional[Thread] = None
 ALERT_WORKER_STATE: Dict[str, Any] = {
     "running": False,
@@ -129,6 +139,7 @@ DEFAULT_SOURCE = os.getenv("APP_SOURCE", "auto")
 DEFAULT_HOST = os.getenv("APP_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("APP_PORT", "8000"))
 DEFAULT_STRATEGY = "liu_core_v2"
+VISIBLE_BUILTIN_STRATEGY_IDS = ("none", "liu_core_v2", "liu_stock_pick_v1")
 STRATEGY_TIMEFRAMES = set(SUPPORTED_STRATEGY_TIMEFRAMES)
 CUSTOM_VALUE_LABELS = {
     "DIF": "MACD DIF 快线",
@@ -265,6 +276,48 @@ def fetch_bars_with_source_cached(
     )
 
 
+def fetch_bars_with_auto_fallback(
+    symbol: str,
+    timeframe: str,
+    max_bars: int,
+    adjust: str,
+    source: str,
+    ttl: float,
+    *,
+    minimum_bars: int = 1,
+) -> Tuple[str, List[Any], str]:
+    requested_source = normalize_source_name(source)
+    name, bars, actual_source = fetch_bars_with_source_cached(symbol, timeframe, max_bars, adjust, requested_source, ttl)
+    if requested_source != "auto" or len(bars) >= max(1, minimum_bars):
+        return name, bars, actual_source
+
+    best_name = name
+    best_bars = bars
+    best_source = actual_source
+    for candidate in SOURCE_HEALTH_TRACKER.ordered_sources("bars"):
+        candidate_source = normalize_source_name(candidate)
+        if candidate_source == actual_source:
+            continue
+        try:
+            next_name, next_bars, next_actual_source = fetch_bars_with_source_cached(
+                symbol,
+                timeframe,
+                max_bars,
+                adjust,
+                candidate_source,
+                ttl,
+            )
+        except Exception:
+            continue
+        if len(next_bars) > len(best_bars):
+            best_name = next_name
+            best_bars = next_bars
+            best_source = next_actual_source
+        if len(next_bars) >= max(1, minimum_bars):
+            return next_name, next_bars, next_actual_source
+    return best_name, best_bars, best_source
+
+
 def _combine_bar_bucket(bucket: List[Bar]) -> Bar:
     if not bucket:
         raise MarketDataError("Cannot aggregate an empty bar bucket")
@@ -332,33 +385,37 @@ def fetch_strategy_bars_with_source(
     source: str,
 ) -> Tuple[str, List[Bar], str]:
     requested_source = normalize_source_name(source)
+    minimum_bars = max(1, min(int(max_bars or 1), 60))
     if timeframe == "120m":
-        name, raw_bars, actual_source = fetch_bars_with_source_cached(
+        name, raw_bars, actual_source = fetch_bars_with_auto_fallback(
             symbol,
             "60m",
             max(max_bars * 2 + 12, 160),
             "none",
             requested_source,
             STRATEGY_SIGNAL_CACHE_TTL,
+            minimum_bars=max(minimum_bars * 2, 120),
         )
         return name, aggregate_120m_bars(raw_bars)[-max_bars:], actual_source
     if timeframe == "1q":
-        name, raw_bars, actual_source = fetch_bars_with_source_cached(
+        name, raw_bars, actual_source = fetch_bars_with_auto_fallback(
             symbol,
             "1M",
             max(max_bars * 3 + 6, 48),
             "none",
             requested_source,
             STRATEGY_SIGNAL_CACHE_TTL,
+            minimum_bars=max(minimum_bars * 3, 24),
         )
         return name, aggregate_quarterly_bars(raw_bars)[-max_bars:], actual_source
-    return fetch_bars_with_source_cached(
+    return fetch_bars_with_auto_fallback(
         symbol,
         timeframe,
         max_bars,
         "none",
         requested_source,
         STRATEGY_SIGNAL_CACHE_TTL,
+        minimum_bars=minimum_bars,
     )
 
 
@@ -370,39 +427,43 @@ def fetch_chart_bars_with_source(
     source: str,
 ) -> Tuple[str, List[Bar], str]:
     requested_source = normalize_source_name(source)
+    minimum_bars = max(1, min(int(max_bars or 1), 20))
     if timeframe == "120m":
-        name, raw_bars, actual_source = fetch_bars_with_source_cached(
+        name, raw_bars, actual_source = fetch_bars_with_auto_fallback(
             symbol,
             "60m",
             max(max_bars * 2 + 12, 160),
             adjust,
             requested_source,
             CHART_CACHE_TTL,
+            minimum_bars=max(minimum_bars * 2, 40),
         )
         bars = aggregate_120m_bars(raw_bars)[-max_bars:]
         if not bars:
             raise MarketDataError(f"{symbol} 120m 聚合后没有可用 K 线数据")
         return name, bars, actual_source
     if timeframe == "1q":
-        name, raw_bars, actual_source = fetch_bars_with_source_cached(
+        name, raw_bars, actual_source = fetch_bars_with_auto_fallback(
             symbol,
             "1M",
             max(max_bars * 3 + 6, 48),
             adjust,
             requested_source,
             CHART_CACHE_TTL,
+            minimum_bars=max(minimum_bars * 3, 12),
         )
         bars = aggregate_quarterly_bars(raw_bars)[-max_bars:]
         if not bars:
             raise MarketDataError(f"{symbol} 季线聚合后没有可用 K 线数据")
         return name, bars, actual_source
-    return fetch_bars_with_source_cached(
+    return fetch_bars_with_auto_fallback(
         symbol,
         timeframe,
         max_bars,
         adjust,
         requested_source,
         CHART_CACHE_TTL,
+        minimum_bars=minimum_bars,
     )
 
 
@@ -831,6 +892,62 @@ def iso_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def load_xueqiu_cookie_state() -> Dict[str, Any]:
+    if not os.path.exists(XUEQIU_COOKIE_PATH):
+        return {"cookies": {}, "updated_at": "", "validation_ok": False, "last_error": "未配置"}
+    try:
+        with open(XUEQIU_COOKIE_PATH, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {"cookies": {}, "updated_at": "", "validation_ok": False, "last_error": "读取失败"}
+    if not isinstance(payload, dict):
+        return {"cookies": {}, "updated_at": "", "validation_ok": False, "last_error": "格式异常"}
+    cookies = payload.get("cookies") if isinstance(payload.get("cookies"), dict) else {}
+    payload["cookies"] = {str(key): str(value) for key, value in cookies.items() if str(key).strip() and str(value).strip()}
+    payload.setdefault("updated_at", "")
+    payload.setdefault("validated_at", "")
+    payload.setdefault("validation_ok", False)
+    payload.setdefault("last_error", "未配置" if not payload["cookies"] else "")
+    return payload
+
+
+def save_xueqiu_cookie_state(payload: Dict[str, Any]) -> Dict[str, Any]:
+    next_payload = {
+        "cookies": payload.get("cookies") if isinstance(payload.get("cookies"), dict) else {},
+        "updated_at": str(payload.get("updated_at") or ""),
+        "validated_at": str(payload.get("validated_at") or ""),
+        "validation_ok": bool(payload.get("validation_ok")),
+        "last_error": str(payload.get("last_error") or ""),
+        "summary": payload.get("summary") if isinstance(payload.get("summary"), dict) else {},
+    }
+    tmp_path = f"{XUEQIU_COOKIE_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as file:
+        json.dump(next_payload, file, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, XUEQIU_COOKIE_PATH)
+    return next_payload
+
+
+def build_xueqiu_cookie_response(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    state = copy.deepcopy(payload or load_xueqiu_cookie_state())
+    cookies = state.get("cookies") if isinstance(state.get("cookies"), dict) else {}
+    summary = xueqiu_cookie_summary(cookies)
+    if isinstance(state.get("summary"), dict):
+        summary.update({key: value for key, value in state["summary"].items() if value not in (None, "")})
+    return {
+        "configured": bool(cookies),
+        "updated_at": str(state.get("updated_at") or ""),
+        "validated_at": str(state.get("validated_at") or ""),
+        "validation_ok": bool(state.get("validation_ok")),
+        "last_error": str(state.get("last_error") or ""),
+        "summary": summary,
+        "cookie_keys": summary.get("keys") or [],
+        "cookie_key_count": int(summary.get("key_count") or 0),
+        "user_id": str(summary.get("user_id") or ""),
+        "expires_at": str(summary.get("expires_at") or ""),
+        "is_login": bool(summary.get("is_login")),
+    }
+
+
 def normalize_alert_runtime_watchlist_item(raw: Any) -> Optional[Dict[str, str]]:
     if not isinstance(raw, dict):
         return None
@@ -1009,6 +1126,10 @@ def snapshot_alert_worker_state() -> Dict[str, Any]:
 def patch_alert_worker_state(**fields: Any) -> None:
     with ALERT_WORKER_STATE_LOCK:
         ALERT_WORKER_STATE.update(fields)
+
+
+def request_alert_worker_run() -> None:
+    ALERT_WORKER_WAKE.set()
 
 
 def build_alert_runtime_response(state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2057,9 +2178,20 @@ def normalize_strategy_name(raw: str) -> str:
 def build_strategy_list_payload() -> Dict[str, Any]:
     strategies = all_strategy_presets()
     overridden_ids = set(load_strategy_overrides().keys())
+    visible_records: List[Dict[str, Any]] = []
+    for strategy_id in VISIBLE_BUILTIN_STRATEGY_IDS:
+        strategy = strategies.get(strategy_id)
+        if strategy:
+            visible_records.append(build_client_strategy_record(strategy, overridden_ids))
+    for strategy in strategies.values():
+        strategy_id = str(strategy.get("id") or "").strip().lower()
+        if strategy_id in VISIBLE_BUILTIN_STRATEGY_IDS:
+            continue
+        if strategy.get("type") == "custom":
+            visible_records.append(build_client_strategy_record(strategy, overridden_ids))
     return {
         "default": DEFAULT_STRATEGY,
-        "strategies": [build_client_strategy_record(item, overridden_ids) for item in strategies.values()],
+        "strategies": visible_records,
         "notes": [
             "策略信号独立于主图周期，按各自规则的固定周期计算。",
             "刘昌松策略的本地修改会保存到 strategy_overrides.json。",
@@ -2985,11 +3117,18 @@ def api_alert_runtime() -> Any:
 @app.put("/api/alert-runtime")
 def api_alert_runtime_update() -> Any:
     data = request.get_json(silent=True) or {}
+    change_flags = {
+        "watchlist": False,
+        "strategy": False,
+        "source": False,
+        "webhook": False,
+    }
 
     def mutator(state: Dict[str, Any]) -> Dict[str, Any]:
         watchlist_changed = False
         strategy_changed = False
         source_changed = False
+        webhook_changed = False
 
         if "watchlist" in data:
             watchlist_payload = data.get("watchlist")
@@ -3016,9 +3155,15 @@ def api_alert_runtime_update() -> Any:
             webhook_payload = data.get("webhook") or {}
             webhook = dict(state.get("webhook") or {})
             if "url" in webhook_payload:
-                webhook["url"] = str(webhook_payload.get("url") or "").strip()
+                next_url = str(webhook_payload.get("url") or "").strip()
+                if next_url != str(webhook.get("url") or "").strip():
+                    webhook_changed = True
+                webhook["url"] = next_url
             if "enabled_symbols" in webhook_payload:
-                webhook["enabled_symbols"] = normalize_alert_runtime_enabled_symbols(webhook_payload.get("enabled_symbols"))
+                next_enabled_symbols = normalize_alert_runtime_enabled_symbols(webhook_payload.get("enabled_symbols"))
+                if next_enabled_symbols != normalize_alert_runtime_enabled_symbols(webhook.get("enabled_symbols")):
+                    webhook_changed = True
+                webhook["enabled_symbols"] = next_enabled_symbols
             state["webhook"] = webhook
 
         webhook = dict(state.get("webhook") or {})
@@ -3029,8 +3174,11 @@ def api_alert_runtime_update() -> Any:
         ]
         enabled_symbols = normalize_alert_runtime_enabled_symbols(webhook.get("enabled_symbols"))
         if watchlist_changed:
-            enabled_symbols = [symbol for symbol in enabled_symbols if symbol in set(watchlist_symbols)]
-            webhook["enabled_symbols"] = enabled_symbols
+            filtered_enabled_symbols = [symbol for symbol in enabled_symbols if symbol in set(watchlist_symbols)]
+            if filtered_enabled_symbols != enabled_symbols:
+                webhook_changed = True
+            enabled_symbols = filtered_enabled_symbols
+            webhook["enabled_symbols"] = filtered_enabled_symbols
 
         if strategy_changed or source_changed:
             webhook["alert_states"] = {}
@@ -3041,15 +3189,117 @@ def api_alert_runtime_update() -> Any:
                 enabled_symbols=enabled_symbols,
             )
         state["webhook"] = webhook
+        change_flags["watchlist"] = watchlist_changed
+        change_flags["strategy"] = strategy_changed
+        change_flags["source"] = source_changed
+        change_flags["webhook"] = webhook_changed
         return state
 
     try:
         runtime = update_alert_runtime_state(mutator)
+        if any(change_flags.values()):
+            request_alert_worker_run()
         return jsonify(build_alert_runtime_response(runtime))
     except MarketDataError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/xueqiu-cookie")
+def api_xueqiu_cookie() -> Any:
+    with XUEQIU_COOKIE_LOCK:
+        return jsonify(build_xueqiu_cookie_response())
+
+
+@app.put("/api/xueqiu-cookie")
+def api_xueqiu_cookie_update() -> Any:
+    data = request.get_json(silent=True) or {}
+    raw_cookie = str(data.get("cookie") or data.get("raw_cookie") or "").strip()
+    if not raw_cookie:
+        return jsonify({"error": "请输入完整 Cookie 字符串。"}), 400
+    cookie_map = parse_cookie_header_string(raw_cookie)
+    selected = select_xueqiu_core_cookies(cookie_map)
+    if not selected:
+        return jsonify({"error": "未解析到可用的雪球核心 Cookie 字段。"}), 400
+    try:
+        summary = probe_xueqiu_cookie_map(selected)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    with XUEQIU_COOKIE_LOCK:
+        saved = save_xueqiu_cookie_state(
+            {
+                "cookies": selected,
+                "updated_at": iso_now(),
+                "validated_at": iso_now(),
+                "validation_ok": True,
+                "last_error": "",
+                "summary": summary,
+            }
+        )
+        return jsonify(build_xueqiu_cookie_response(saved))
+
+
+@app.post("/api/xueqiu-cookie/validate")
+def api_xueqiu_cookie_validate() -> Any:
+    data = request.get_json(silent=True) or {}
+    raw_cookie = str(data.get("cookie") or data.get("raw_cookie") or "").strip()
+    using_stored_cookie = not raw_cookie
+    if raw_cookie:
+        cookie_map = select_xueqiu_core_cookies(parse_cookie_header_string(raw_cookie))
+    else:
+        with XUEQIU_COOKIE_LOCK:
+            cookie_map = load_xueqiu_cookie_state().get("cookies") or {}
+    if not isinstance(cookie_map, dict) or not cookie_map:
+        return jsonify({"error": "当前没有可校验的雪球 Cookie。"}), 400
+    try:
+        summary = probe_xueqiu_cookie_map(cookie_map)
+        validated_at = iso_now()
+        if using_stored_cookie:
+            with XUEQIU_COOKIE_LOCK:
+                current = load_xueqiu_cookie_state()
+                current["validated_at"] = validated_at
+                current["validation_ok"] = True
+                current["last_error"] = ""
+                current["summary"] = summary
+                save_xueqiu_cookie_state(current)
+        return jsonify(
+            {
+                "ok": True,
+                "validation_ok": True,
+                "validated_at": validated_at,
+                "cookie_key_count": len(cookie_map),
+                "cookie_keys": sorted(cookie_map.keys()),
+                "expires_at": summary.get("expires_at") or "",
+                "summary": summary,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        validated_at = iso_now()
+        if using_stored_cookie:
+            with XUEQIU_COOKIE_LOCK:
+                current = load_xueqiu_cookie_state()
+                current["validated_at"] = validated_at
+                current["validation_ok"] = False
+                current["last_error"] = str(exc)
+                save_xueqiu_cookie_state(current)
+        return jsonify({"ok": False, "validation_ok": False, "error": str(exc), "validated_at": validated_at}), 400
+
+
+@app.delete("/api/xueqiu-cookie")
+def api_xueqiu_cookie_delete() -> Any:
+    with XUEQIU_COOKIE_LOCK:
+        saved = save_xueqiu_cookie_state(
+            {
+                "cookies": {},
+                "updated_at": iso_now(),
+                "validated_at": iso_now(),
+                "validation_ok": False,
+                "last_error": "未配置",
+                "summary": {},
+            }
+        )
+        return jsonify(build_xueqiu_cookie_response(saved))
 
 
 def webhook_provider_for_url(url: str) -> str:
@@ -3403,6 +3653,7 @@ def run_alert_worker_cycle() -> int:
         previous_action = str(previous_entry.get("action") or "").strip().lower()
         last_alert_day_key = str(previous_entry.get("lastAlertDayKey") or "").strip()
         is_alert_signal = next_signal in {"BUY", "SELL"}
+        should_send = False
 
         if not previous_signal:
             states[symbol] = {
@@ -3414,10 +3665,8 @@ def run_alert_worker_cycle() -> int:
                 "updatedAt": iso_now(),
             }
             changed = True
-            continue
-
-        should_send = False
-        if previous_signal == next_signal and previous_action == next_action:
+            should_send = is_alert_signal
+        elif previous_signal == next_signal and previous_action == next_action:
             if str(previous_entry.get("dayKey") or "") != day_key:
                 states[symbol] = {
                     **previous_entry,
@@ -3480,11 +3729,15 @@ def run_alert_worker_cycle() -> int:
 def alert_worker_loop() -> None:
     patch_alert_worker_state(running=True, started_at=iso_now(), last_error="")
     while not ALERT_WORKER_STOP.is_set():
+        ALERT_WORKER_WAKE.clear()
         try:
             run_alert_worker_cycle()
         except Exception as exc:  # noqa: BLE001
             patch_alert_worker_state(last_error=str(exc))
-        ALERT_WORKER_STOP.wait(ALERT_WORKER_INTERVAL_SECONDS)
+        ALERT_WORKER_STOP.wait(0.05)
+        if ALERT_WORKER_STOP.is_set():
+            break
+        ALERT_WORKER_WAKE.wait(ALERT_WORKER_INTERVAL_SECONDS)
     patch_alert_worker_state(running=False)
 
 
@@ -3528,7 +3781,7 @@ ensure_alert_worker_started()
 
 
 if __name__ == "__main__":
-    warm_search_cache()
+    Thread(target=warm_search_cache, name="signaldeck-search-warm", daemon=True).start()
     try:
         from waitress import serve
     except ImportError:

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -11,6 +13,11 @@ from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+try:
+    import requests
+except ImportError:  # pragma: no cover - optional dependency during local packaging
+    requests = None
 
 
 HEADERS = {
@@ -21,6 +28,13 @@ HEADERS = {
 TENCENT_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://gu.qq.com/",
+}
+
+XUEQIU_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://xueqiu.com",
+    "Referer": "https://xueqiu.com/hq",
 }
 
 TIMEFRAME_TO_KLT = {
@@ -60,6 +74,39 @@ TENCENT_ADJUST_MAP = {
     "hfq": "hfq",
 }
 
+XUEQIU_PERIOD_MAP = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "60m": "60m",
+    "120m": "120m",
+    "1d": "day",
+    "1w": "week",
+    "1M": "month",
+    "1q": "quarter",
+}
+
+XUEQIU_ADJUST_MAP = {
+    "none": "normal",
+    "qfq": "before",
+    "hfq": "after",
+}
+
+XUEQIU_CORE_COOKIE_KEYS = (
+    "xq_a_token",
+    "xqat",
+    "xq_id_token",
+    "xq_r_token",
+    "xq_is_login",
+    "u",
+)
+
+XUEQIU_OPTIONAL_COOKIE_KEYS = (
+    "cookiesu",
+    "acw_tc",
+)
+
 SOURCE_METADATA = {
     "auto": {
         "label": "自动选择",
@@ -79,11 +126,17 @@ SOURCE_METADATA = {
         "supports_bars": True,
         "supports_snapshot": True,
     },
+    "xueqiu": {
+        "label": "雪球",
+        "description": "基于录入 Cookie 的雪球行情源，可拉取快照与多周期 K 线。",
+        "supports_bars": True,
+        "supports_snapshot": True,
+    },
 }
 
 SOURCE_BASE_ORDER = {
-    "bars": ["tencent", "eastmoney"],
-    "snapshot": ["tencent", "eastmoney"],
+    "bars": ["tencent", "eastmoney", "xueqiu"],
+    "snapshot": ["tencent", "eastmoney", "xueqiu"],
 }
 
 
@@ -297,6 +350,14 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[st
     return json.loads(text)
 
 
+def http_get_json_requests(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    if requests is None:
+        return http_get_json(url, headers=headers)
+    response = requests.get(url, headers=headers or HEADERS, timeout=20)
+    response.raise_for_status()
+    return response.json()
+
+
 def to_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -329,6 +390,137 @@ def source_label(source: str) -> str:
     return SOURCE_METADATA[source]["label"]
 
 
+def resolve_xueqiu_cookie_path() -> str:
+    explicit = str(os.getenv("SIGNAL_DECK_XUEQIU_COOKIE_PATH", "")).strip()
+    if explicit:
+        return os.path.abspath(explicit)
+    data_dir = str(os.getenv("SIGNAL_DECK_DATA_DIR", "")).strip()
+    if data_dir:
+        return os.path.abspath(os.path.join(data_dir, "xueqiu_cookies.json"))
+    return os.path.abspath(os.path.join(os.path.expanduser("~"), ".signal-deck", "xueqiu_cookies.json"))
+
+
+def parse_cookie_header_string(raw: str) -> Dict[str, str]:
+    cookie_map: Dict[str, str] = {}
+    for chunk in str(raw or "").split(";"):
+        item = chunk.strip()
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        if key.lower() in {"cookie", "set-cookie", "elastic-apm-traceparent"}:
+            continue
+        cookie_map[key] = value
+    return cookie_map
+
+
+def select_xueqiu_core_cookies(cookie_map: Dict[str, str]) -> Dict[str, str]:
+    selected: Dict[str, str] = {}
+    for key in list(XUEQIU_CORE_COOKIE_KEYS) + list(XUEQIU_OPTIONAL_COOKIE_KEYS):
+        value = str((cookie_map or {}).get(key) or "").strip()
+        if value:
+            selected[key] = value
+    return selected
+
+
+def build_cookie_header(cookie_map: Dict[str, str]) -> str:
+    parts = []
+    for key, value in (cookie_map or {}).items():
+        key_text = str(key or "").strip()
+        value_text = str(value or "").strip()
+        if key_text and value_text:
+            parts.append(f"{key_text}={value_text}")
+    return "; ".join(parts)
+
+
+def decode_jwt_payload(token: str) -> Dict[str, Any]:
+    text = str(token or "").strip()
+    parts = text.split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def xueqiu_cookie_summary(cookie_map: Dict[str, str]) -> Dict[str, Any]:
+    selected = select_xueqiu_core_cookies(cookie_map or {})
+    payload = decode_jwt_payload(selected.get("xq_id_token", ""))
+    expires_at = None
+    expires_at_epoch = payload.get("exp")
+    if isinstance(expires_at_epoch, (int, float)) and expires_at_epoch > 0:
+        expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(expires_at_epoch)))
+    return {
+        "keys": sorted(selected.keys()),
+        "key_count": len(selected),
+        "user_id": str(selected.get("u") or payload.get("uid") or "").strip(),
+        "expires_at": expires_at,
+        "is_login": str(selected.get("xq_is_login") or "") == "1",
+    }
+
+
+def load_xueqiu_cookie_payload() -> Dict[str, Any]:
+    path = resolve_xueqiu_cookie_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_xueqiu_cookie_map() -> Dict[str, str]:
+    payload = load_xueqiu_cookie_payload()
+    cookies = payload.get("cookies") if isinstance(payload.get("cookies"), dict) else {}
+    return {str(key): str(value) for key, value in cookies.items() if str(key).strip() and str(value).strip()}
+
+
+def probe_xueqiu_cookie_map(cookie_map: Dict[str, str], symbol: str = "sh000001") -> Dict[str, Any]:
+    selected = select_xueqiu_core_cookies(cookie_map or {})
+    if not selected:
+        raise MarketDataError("No usable Xueqiu cookie fields found")
+    headers = dict(XUEQIU_HEADERS)
+    headers["Cookie"] = build_cookie_header(selected)
+    xq_symbol = str(symbol or "").strip().upper()
+    begin = int(time.time() * 1000)
+    quote_payload = http_get_json_requests(
+        f"https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol={xq_symbol}",
+        headers=headers,
+    )
+    quote_rows = list(quote_payload.get("data") or [])
+    if str(quote_payload.get("error_code") or "") not in {"", "0"} or not quote_rows:
+        raise MarketDataError(str(quote_payload.get("error_description") or "Xueqiu snapshot validation failed"))
+    kline_payload = http_get_json_requests(
+        (
+            "https://stock.xueqiu.com/v5/stock/chart/kline.json?"
+            f"symbol={xq_symbol}&begin={begin}&period=60m&type=before&count=-30&indicator=kline"
+        ),
+        headers=headers,
+    )
+    kline_rows = list(((kline_payload.get("data") or {}).get("item")) or [])
+    if str(kline_payload.get("error_code") or "") not in {"", "0"} or not kline_rows:
+        raise MarketDataError(str(kline_payload.get("error_description") or "Xueqiu kline validation failed"))
+    summary = xueqiu_cookie_summary(selected)
+    summary.update(
+        {
+            "quote_symbol": str((quote_rows[0] or {}).get("symbol") or xq_symbol),
+            "quote_count": len(quote_rows),
+            "kline_count": len(kline_rows),
+            "validated_symbol": xq_symbol,
+        }
+    )
+    return summary
+
+
 def _compute_change(last_price: Optional[float], prev_close: Optional[float]) -> Optional[float]:
     if last_price is None or prev_close is None:
         return None
@@ -346,6 +538,19 @@ def _format_tencent_timestamp(value: Any) -> Optional[str]:
     if len(raw) != 14 or not raw.isdigit():
         return None
     return f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]} {raw[8:10]}:{raw[10:12]}:{raw[12:14]}"
+
+
+def _format_xueqiu_timestamp(value: Any, timeframe: str) -> Optional[str]:
+    millis = to_float(value)
+    if millis is None:
+        return None
+    seconds = millis / 1000.0
+    fmt = "%Y-%m-%d %H:%M"
+    if timeframe == "1M":
+        fmt = "%Y-%m"
+    elif timeframe in {"1d", "1w"}:
+        fmt = "%Y-%m-%d"
+    return time.strftime(fmt, time.localtime(seconds))
 
 
 def tail(values: List[Any], count: int) -> List[Any]:
@@ -589,6 +794,32 @@ class TencentProviderAdapter(LegacyProviderAdapter):
         return self.client._fetch_snapshot_tencent(symbol)
 
 
+class XueqiuProviderAdapter(LegacyProviderAdapter):
+    def __init__(self, client: "EastMoneyClient") -> None:
+        super().__init__(
+            client,
+            "xueqiu",
+            ProviderCapabilities(
+                supports_bars=True,
+                supports_snapshot=True,
+                supported_timeframes=tuple(XUEQIU_PERIOD_MAP.keys()),
+                supported_adjustments=tuple(XUEQIU_ADJUST_MAP.keys()),
+            ),
+        )
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        max_bars: int,
+        adjust: str,
+    ) -> Tuple[str, List[Bar]]:
+        return self.client._fetch_bars_xueqiu(symbol, timeframe, max_bars, adjust)
+
+    def fetch_snapshot(self, symbol: str) -> MarketSnapshot:
+        return self.client._fetch_snapshot_xueqiu(symbol)
+
+
 class MarketDataRouter:
     def __init__(
         self,
@@ -675,9 +906,12 @@ class EastMoneyClient:
     tencent_history_base = "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
     tencent_minute_base = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
     tencent_quote_base = "https://qt.gtimg.cn/q="
+    xueqiu_kline_base = "https://stock.xueqiu.com/v5/stock/chart/kline.json"
+    xueqiu_minute_base = "https://stock.xueqiu.com/v5/stock/chart/minute.json"
+    xueqiu_quote_base = "https://stock.xueqiu.com/v5/stock/realtime/quotec.json"
 
     def __init__(self, providers: Optional[Iterable[MarketDataProvider]] = None) -> None:
-        provider_items = list(providers or [TencentProviderAdapter(self), EastMoneyProviderAdapter(self)])
+        provider_items = list(providers or [TencentProviderAdapter(self), EastMoneyProviderAdapter(self), XueqiuProviderAdapter(self)])
         self.providers: Dict[str, MarketDataProvider] = {provider.provider_id: provider for provider in provider_items}
         self.router = MarketDataRouter(self.providers, SOURCE_HEALTH_TRACKER)
 
@@ -860,6 +1094,124 @@ class EastMoneyClient:
         if not bars:
             raise MarketDataError(f"{symbol} fallback kline parse failed")
         return name, bars
+
+    def _xueqiu_headers(self, require_cookie: bool = False) -> Dict[str, str]:
+        headers = dict(XUEQIU_HEADERS)
+        cookie_map = load_xueqiu_cookie_map()
+        cookie_header = build_cookie_header(cookie_map)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        if require_cookie and not cookie_header:
+            raise MarketDataError("Xueqiu login cookie not configured")
+        return headers
+
+    @staticmethod
+    def _xueqiu_symbol(symbol: str) -> str:
+        return str(symbol or "").strip().upper()
+
+    def _fetch_bars_xueqiu(
+        self,
+        symbol: str,
+        timeframe: str,
+        max_bars: int,
+        adjust: str,
+    ) -> Tuple[str, List[Bar]]:
+        period = XUEQIU_PERIOD_MAP.get(timeframe)
+        if not period:
+            raise MarketDataError(f"unsupported timeframe for Xueqiu: {timeframe}")
+        adjust_type = XUEQIU_ADJUST_MAP.get(adjust)
+        if not adjust_type:
+            raise MarketDataError(f"unsupported adjust for Xueqiu: {adjust}")
+        params = {
+            "symbol": self._xueqiu_symbol(symbol),
+            "begin": int(time.time() * 1000),
+            "period": period,
+            "type": adjust_type,
+            "count": -max(30, int(max_bars)),
+            "indicator": "kline",
+        }
+        payload = http_get_json_requests(
+            f"{self.xueqiu_kline_base}?{urlencode(params)}",
+            headers=self._xueqiu_headers(require_cookie=True),
+        )
+        if str(payload.get("error_code") or "") not in {"", "0"}:
+            raise MarketDataError(str(payload.get("error_description") or "xueqiu kline request failed"))
+        data = payload.get("data") or {}
+        columns = list(data.get("column") or [])
+        rows = list(data.get("item") or [])
+        if not rows:
+            raise MarketDataError(f"{symbol} xueqiu returned no kline data")
+        index_map = {str(name): idx for idx, name in enumerate(columns)}
+
+        def pick(row: List[Any], key: str) -> Any:
+            idx = index_map.get(key)
+            if idx is None or idx >= len(row):
+                return None
+            return row[idx]
+
+        bars: List[Bar] = []
+        for row in tail(rows, max_bars):
+            stamp = _format_xueqiu_timestamp(pick(row, "timestamp"), timeframe)
+            open_price = to_float(pick(row, "open"))
+            close_price = to_float(pick(row, "close"))
+            high_price = to_float(pick(row, "high"))
+            low_price = to_float(pick(row, "low"))
+            volume = to_float(pick(row, "volume"))
+            amount = to_float(pick(row, "amount"))
+            if not stamp or None in (open_price, close_price, high_price, low_price, volume):
+                continue
+            bars.append(
+                Bar(
+                    timestamp=stamp,
+                    open=open_price or 0.0,
+                    close=close_price or 0.0,
+                    high=high_price or 0.0,
+                    low=low_price or 0.0,
+                    volume=volume or 0.0,
+                    amount=amount or 0.0,
+                )
+            )
+        if not bars:
+            raise MarketDataError(f"{symbol} xueqiu kline parse failed")
+        return symbol, bars
+
+    def _fetch_snapshot_xueqiu(self, symbol: str) -> MarketSnapshot:
+        params = {"symbol": self._xueqiu_symbol(symbol)}
+        payload = http_get_json_requests(
+            f"{self.xueqiu_quote_base}?{urlencode(params)}",
+            headers=self._xueqiu_headers(require_cookie=False),
+        )
+        if str(payload.get("error_code") or "") not in {"", "0"}:
+            raise MarketDataError(str(payload.get("error_description") or "xueqiu snapshot request failed"))
+        rows = list(payload.get("data") or [])
+        if not rows:
+            raise MarketDataError(f"{symbol} xueqiu returned no snapshot data")
+        data = rows[0] or {}
+        last_price = to_float(data.get("current"))
+        prev_close = to_float(data.get("last_close"))
+        return MarketSnapshot(
+            symbol=symbol,
+            name=symbol,
+            source="xueqiu",
+            last_price=last_price,
+            prev_close=prev_close,
+            open=to_float(data.get("open")),
+            high=to_float(data.get("high")),
+            low=to_float(data.get("low")),
+            volume=to_float(data.get("volume")),
+            amount=to_float(data.get("amount")),
+            change=to_float(data.get("chg")) if to_float(data.get("chg")) is not None else _compute_change(last_price, prev_close),
+            change_pct=to_float(data.get("percent")) if to_float(data.get("percent")) is not None else _compute_change_pct(last_price, prev_close),
+            turnover_rate=to_float(data.get("turnover_rate")),
+            amplitude_pct=to_float(data.get("amplitude")),
+            pe_dynamic=to_float(data.get("pe_ttm")),
+            pb=to_float(data.get("pb")),
+            total_market_value=to_float(data.get("market_capital")),
+            circulating_market_value=to_float(data.get("float_market_capital")),
+            upper_limit=to_float(data.get("limit_up")),
+            lower_limit=to_float(data.get("limit_down")),
+            timestamp=_format_xueqiu_timestamp(data.get("timestamp"), "1m"),
+        )
 
     def _fetch_snapshot_eastmoney(self, symbol: str) -> MarketSnapshot:
         params = {

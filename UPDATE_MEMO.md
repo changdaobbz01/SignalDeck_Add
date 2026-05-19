@@ -1,62 +1,94 @@
-# Signal Deck Update Memo
+# Signal Deck 接力备忘
 
-This memo is the quick checklist for the next update cycle.
+这份备忘用于从当前可运行基线继续开发或验收。
 
-## Workspace
+## 工作目录
 
-- Active workspace: `F:\webProject\5M`
-- Do not modify: `D:\文档\New project 2`
-- Local desktop launcher entry:
-  - Project script: `F:\webProject\5M\launch_signal_deck.cmd`
-  - Desktop shortcut: `C:\Users\admin\Desktop\Signal Deck 启动器.lnk`
+- 当前唯一工作目录：`F:\webProject\5M`
+- 不再修改：`D:\文档\New project 2`
 
-## Before The Next Update
+## 当前产品状态
 
-1. Confirm the worktree is clean enough to identify new changes clearly.
-2. Start from `F:\webProject\5M` only.
-3. Check whether a local Signal Deck service is already running.
-4. If `static/app.js`, `static/styles.css`, or `templates/index.html` will change, plan to bump the static asset version in `templates/index.html`.
-5. If strategy logic will change, decide first whether it belongs in:
-   - `strategy_presets.json`
-   - `strategy_engine.py`
-   - `app.py`
-6. If chart timeframes will change, verify both:
-   - strategy fetch path
-   - chart fetch path
+- 主策略：`liu_core_v2`
+- 前台策略选择已收敛为：
+  - `none`
+  - `liu_core_v2`
+  - `liu_stock_pick_v1`
+- 勾选标的的 WebHook 监控由服务端 worker 常驻执行，不依赖前端页面保持打开。
+- 首次勾选某个标的时，如果当前已经命中规则，会立即补发一次 WebHook。
+- 顶部健康状态条、规则命中抽屉、雪球 Cookie 独立弹窗都已经接好。
+- 规则命中抽屉行为：
+  - 打开时加载一次
+  - 打开期间不重复整组重载
+  - 关闭后再次打开才重新加载
 
-## Current Architecture Notes
+## 数据源状态
 
-- Strategy engine:
-  - `strategy_engine.py`
-  - `strategy_presets.json`
-- Web app and background worker:
-  - `app.py`
-- Market source adapters:
-  - `market_signal_tool.py`
-- Desktop launcher:
-  - `desktop_launcher.py`
-- Frontend:
-  - `templates/index.html`
-  - `static/app.js`
-  - `static/styles.css`
+- `auto` 当前主要依赖：
+  - `tencent`
+  - `xueqiu`
+- `eastmoney` 仍不稳定，不建议作为主源。
+- 雪球已经支持 Cookie 录入、保存与校验。
+- 雪球 Cookie 入口是独立弹窗，不再和 WebHook 弹窗混在一起。
 
-## Important Behavior To Preserve
+## 打包与分发状态
 
-- `120m` chart data must be aggregated from `60m`.
-- `1q` chart data must be aggregated from `1M`.
-- `1d` and `1w` should prefer `auto`, with Tencent fallback working under `qfq`.
-- The launcher should reuse an existing healthy local Signal Deck service instead of starting a duplicate one.
-- The alert worker should stay server-side, not front-end driven.
-- Strategy config should remain editable from the rules modal.
+这一轮已经完成“给其他电脑使用”的打包收口：
 
-## Quick Smoke Tests
+- 已清理开发机硬编码路径：
+  - `run_local_server.py`
+  - `build_windows.ps1`
+  - `launch_signal_deck.cmd`
+  - `start_signal_deck.cmd`
+- `SignalDeck.spec` 已补齐关键 DLL 打包逻辑。
+- 启动前搜索预热已改为后台异步，避免 EXE 启动卡住。
+- 打包说明已整理到 `PACKAGING.md`。
+- 当前打包产物：
+  - `artifacts/SignalDeck-windows.zip`
+  - `dist/SignalDeck/SignalDeck.exe`
+- 已在打包后的 `SignalDeck.exe --server` 模式下做过健康检查，`/api/health` 返回 `ok`。
 
-Run these from `F:\webProject\5M`.
+## 本地基线核验
+
+以下检查已通过：
 
 ```powershell
 python -m py_compile app.py strategy_engine.py market_signal_tool.py desktop_launcher.py run_local_server.py
 node --check static\app.js
 ```
+
+当前本地服务 `http://127.0.0.1:8000` 可用，并已确认：
+
+- `/api/health` 返回 `200`
+- `/api/alert-runtime` 返回 `200`
+- `/api/xueqiu-cookie` 返回 `200`
+
+## 下一轮更新前先看
+
+1. 只在 `F:\webProject\5M` 工作。
+2. 先看 `git status`，避免把旧改动和新改动混在一起。
+3. 先检查本地 Signal Deck 服务是否已在运行，再决定是否需要重启。
+4. 如果会改 `static/app.js`、`static/styles.css`、`templates/index.html`，记得同步更新 `templates/index.html` 里的静态资源版本号。
+5. 如果会改策略逻辑，先判断改动应该落在：
+   - `strategy_presets.json`
+   - `strategy_engine.py`
+   - `app.py`
+6. 如果会改周期或 K 线聚合，必须同时验证：
+   - 策略取数路径
+   - 图表取数路径
+
+## 需要保持的行为
+
+- `120m` 仍然必须由 `60m` 聚合。
+- `1q` 仍然必须由 `1M` 聚合。
+- `1d`、`1w` 继续优先走 `auto`，并保持 `qfq` 下 Tencent 回退可用。
+- 启动器应优先复用已健康的本地服务，避免重复拉起第二个实例。
+- alert worker 继续保持服务端常驻，不要退回前端轮询驱动。
+- 规则配置仍应可从规则弹窗编辑。
+
+## 快速烟测
+
+如果改了服务端或数据源，建议从 `F:\webProject\5M` 运行：
 
 ```powershell
 @'
@@ -66,8 +98,9 @@ checks = [
     f"{base}/api/health",
     f"{base}/api/chart?symbol=sh000001&timeframe=120m&bars=120&source=auto",
     f"{base}/api/chart?symbol=sh000001&timeframe=1q&bars=120&source=auto",
-    f"{base}/api/strategy-signal?symbol=sh000001&strategy=liu_core_v1&source=auto",
+    f"{base}/api/strategy-signal?symbol=sh000001&strategy=liu_core_v2&source=auto",
     f"{base}/api/alert-runtime",
+    f"{base}/api/xueqiu-cookie",
 ]
 for url in checks:
     r = requests.get(url, timeout=30)
@@ -75,44 +108,13 @@ for url in checks:
 '@ | python -
 ```
 
-## Rules And Strategy Checks
+## 建议的下一步
 
-- Verify `liu_core_v1` still includes:
-  - weekly trend
-  - daily wave
-  - 60m entry
-  - 120m confirmation
-- Verify divergence coverage is still present for:
-  - weekly bottom/top divergence
-  - daily bottom/top divergence
-  - 60m bottom/top divergence
-  - 120m bottom/top divergence
-- Verify `liu_stock_pick_v1` degrades gracefully to `HOLD` when quarterly data is insufficient.
-
-## WebHook / Worker Checks
-
-- Confirm `/api/alert-runtime` returns:
-  - `worker.running`
-  - `worker.last_run_at`
-  - `worker.last_success_at`
-  - `worker.last_sent_at`
-- If the worker stops, inspect:
-  - `%APPDATA%\SignalDeck\alert_runtime.json`
-  - `launcher-error.log`
-
-## Known Technical Debt
-
-- `static/app.js` still contains repeated function definitions from older iterations.
-- The app runs correctly, but large front-end changes should be done carefully and verified after each edit.
-- Rule evaluation still uses `eval` in a constrained context. Keep strategy sources trusted.
-
-## Recommended Update Order
-
-1. Read this memo.
-2. Check local service and health.
-3. Pull or inspect the current repo state.
-4. Make the smallest backend change first.
-5. Then update frontend bindings and version stamp.
-6. Run smoke tests.
-7. Verify the launcher path and duplicate-service behavior if launcher files changed.
-8. Only then stage, commit, and push.
+- 拿 `artifacts/SignalDeck-windows.zip` 到另一台干净 Windows 电脑做一次真实验收。
+- 在目标电脑重新配置：
+  - WebHook 地址
+  - 雪球 Cookie
+- 如果继续优化，优先考虑：
+  - 左侧未勾选标的的懒更新
+  - 前端大文件拆分
+  - 更稳定的新数据源

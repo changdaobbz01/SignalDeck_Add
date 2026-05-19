@@ -1792,6 +1792,13 @@ button {
   line-height: 1.5;
 }
 
+.signal-drawer-loading {
+  margin: 6px 0 0;
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .signal-grid {
   display: grid;
   gap: 10px;
@@ -2343,6 +2350,10 @@ button.reason-chip {
   color: var(--accent);
 }
 
+.webhook-status-message.warn {
+  color: #f6a21a;
+}
+
 .webhook-status-message.error {
   color: var(--sell);
 }
@@ -2356,6 +2367,10 @@ button.reason-chip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+}
+
+.xueqiu-runtime-grid {
+  margin-top: 10px;
 }
 
 .webhook-runtime-card {
@@ -2406,6 +2421,19 @@ button.reason-chip {
 
 .webhook-runtime-hint.error {
   color: var(--sell);
+}
+
+.webhook-runtime-hint.warn {
+  color: #f6a21a;
+}
+
+.xueqiu-cookie-input {
+  min-height: 156px;
+  margin-top: 10px;
+}
+
+.xueqiu-cookie-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .webhook-meta-grid .meta-pill strong {
